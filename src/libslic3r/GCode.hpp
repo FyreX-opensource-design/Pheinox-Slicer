@@ -315,6 +315,10 @@ private:
 
     std::string extrude_perimeters(const PrintRegion &region, std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters,
                                    const InstanceToPrint &print_instance);
+    // Smoothificator-style outer walls. Returns false when the path should be extruded normally.
+    bool extrude_smooth_outer_wall(const GCode::SmoothPath &smooth_path, bool is_loop,
+                                   const std::string_view description, double speed, std::size_t wipe_offset,
+                                   std::string &gcode);
 
     std::string extrude_infill_ranges(const std::vector<InfillRange> &infill_ranges, const std::string &commment);
 

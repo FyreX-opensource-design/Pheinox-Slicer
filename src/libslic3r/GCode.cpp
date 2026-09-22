@@ -4799,6 +4799,225 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
         perimeters.push_back(std::move(p));
 }
 
+namespace
+{
+bool slice_contains(const ExPolygons &slices, const Point &point)
+{
+    for (const ExPolygon &ex : slices)
+        if (ex.contains(point, true))
+            return true;
+    return false;
+}
+
+Point project_onto_slices(const ExPolygons &slices, const Point &point)
+{
+    double best = std::numeric_limits<double>::infinity();
+    Point best_pt = point;
+    for (const ExPolygon &ex : slices)
+    {
+        const Point projected = ex.point_projection(point);
+        const double dist = (projected - point).cast<double>().squaredNorm();
+        if (dist < best)
+        {
+            best = dist;
+            best_pt = projected;
+        }
+    }
+    return best_pt;
+}
+
+// 4x4 Bayer matrix. fraction in (0, 1) is kept where it exceeds the cell threshold.
+bool bayer_keeps(const Point &point, double fraction)
+{
+    if (fraction <= 0.02)
+        return false;
+    if (fraction >= 0.98)
+        return true;
+    static constexpr int matrix[4][4] = {
+        {0, 8, 2, 10},
+        {12, 4, 14, 6},
+        {3, 11, 1, 9},
+        {15, 7, 13, 5},
+    };
+    const auto cell = [](double mm)
+    {
+        const int v = static_cast<int>(std::floor(mm * 2.0));
+        return (v % 4 + 4) % 4;
+    };
+    const int ix = cell(unscaled<double>(point.x()));
+    const int iy = cell(unscaled<double>(point.y()));
+    return fraction >= (matrix[iy][ix] + 0.5) / 16.0;
+}
+
+GCode::SmoothPath with_pass_flow(const GCode::SmoothPath &src, double flow_factor, float height, float height_fraction)
+{
+    GCode::SmoothPath out = src;
+    for (GCode::SmoothPathElement &el : out)
+    {
+        el.path_attributes.mm3_per_mm *= flow_factor;
+        el.path_attributes.flow_ratio *= static_cast<float>(flow_factor);
+        el.path_attributes.height = height;
+        for (Geometry::ArcWelder::Segment &seg : el.path)
+            seg.height_fraction = height_fraction;
+    }
+    return out;
+}
+
+// t = 1 keeps the sliced contour. t = 0 moves each supported point onto the lower layer's contour.
+GCode::SmoothPath morph_toward_lower(const GCode::SmoothPath &src, const ExPolygons &lower, double t)
+{
+    if (t >= 1.0 - 1e-6)
+        return src;
+    GCode::SmoothPath out = src;
+    for (GCode::SmoothPathElement &el : out)
+    {
+        for (Geometry::ArcWelder::Segment &seg : el.path)
+        {
+            seg.radius = 0.f;
+            if (!slice_contains(lower, seg.point))
+                continue;
+            const Point q = project_onto_slices(lower, seg.point);
+            const Vec2d p = seg.point.cast<double>();
+            const Vec2d blended = q.cast<double>() + t * (p - q.cast<double>());
+            seg.point = Point{coord_t(std::lround(blended.x())), coord_t(std::lround(blended.y()))};
+        }
+    }
+    return out;
+}
+} // namespace
+
+bool GCodeGenerator::extrude_smooth_outer_wall(const GCode::SmoothPath &smooth_path, const bool is_loop,
+                                               const std::string_view description, const double speed,
+                                               const std::size_t wipe_offset, std::string &gcode)
+{
+    const double requested = m_config.outer_wall_layer_height.value;
+    if (requested <= 0. || m_layer == nullptr || m_layer->id() == 0 || m_config.spiral_vase || smooth_path.empty())
+        return false;
+
+    double layer_h = m_layer->height;
+    if (requested >= layer_h - 0.01)
+        return false;
+
+    double pass_h = requested;
+    if (layer_h / pass_h > 12.)
+        pass_h = layer_h / 12.;
+
+    const ExPolygons *lower = (m_layer->lower_layer != nullptr) ? &m_layer->lower_layer->lslices : nullptr;
+    const double slope_thresh = std::max(scale_(0.15), scale_(double(smooth_path.front().path_attributes.width) * 0.35));
+    int total = 0;
+    int sloped = 0;
+    int overhang = 0;
+    if (lower != nullptr)
+    {
+        for (const GCode::SmoothPathElement &el : smooth_path)
+        {
+            for (const Geometry::ArcWelder::Segment &seg : el.path)
+            {
+                ++total;
+                const Point q = project_onto_slices(*lower, seg.point);
+                const double dist = (q - seg.point).cast<double>().norm();
+                if (dist <= slope_thresh)
+                    continue;
+                if (slice_contains(*lower, seg.point))
+                    ++sloped;
+                else
+                    ++overhang;
+            }
+        }
+    }
+
+    // An unsupported loop printed several times would stack plastic in the air.
+    if (total > 0 && overhang * 2 > total)
+        return false;
+
+    const bool curved_top = total > 0 && sloped * 2 > total;
+    const bool last_is_loop = is_loop;
+
+    auto emit_pass = [&](const GCode::SmoothPath &path, double bead_h, float height_fraction, bool loop)
+    {
+        if (bead_h < 0.01 || path.empty())
+            return;
+        const double z = m_last_layer_z + (double(height_fraction) - 1.0) * bead_h;
+        if (z < 0.)
+            return;
+        gcode += m_writer.travel_to_z(z, "smooth outer wall");
+        gcode += this->extrude_smooth_path(with_pass_flow(path, bead_h / layer_h, float(bead_h), height_fraction),
+                                           loop, description, speed, loop ? wipe_offset : 0);
+    };
+
+    if (!curved_top)
+    {
+        // Vertical wall: equal passes that sum to the layer, same contour. Same choice as
+        // Smoothificator_Adaptive — pick the split whose pass height is closest to the request.
+        const int n_ceil = std::max(1, static_cast<int>(std::ceil(layer_h / pass_h - 1e-9)));
+        const int n_floor = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-9)));
+        const int n = (std::abs(layer_h / n_ceil - pass_h) <= std::abs(layer_h / n_floor - pass_h)) ? n_ceil : n_floor;
+        if (n < 2)
+            return false;
+        const double bead = layer_h / n;
+        for (int k = 1; k <= n; ++k)
+        {
+            const float hf = float(k - n + 1);
+            emit_pass(smooth_path, bead, hf, last_is_loop && k == n);
+        }
+        return true;
+    }
+
+    // Curved top: step the wall by the outer-wall height from the previous contour up to this
+    // one. A leftover shorter than one step is dithered along the wall.
+    const int n_full = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-4)));
+    const double remainder = layer_h - n_full * pass_h;
+    if (remainder > 0.02 && lower != nullptr)
+    {
+        const double fraction = remainder / pass_h;
+        const double t = remainder / layer_h;
+        const float hf = float(1.0 - n_full * pass_h / remainder);
+        const GCode::SmoothPath morphed = morph_toward_lower(smooth_path, *lower, t);
+        for (const GCode::SmoothPathElement &el : morphed)
+        {
+            Geometry::ArcWelder::Path run;
+            Geometry::ArcWelder::Segment prev{};
+            bool have_prev = false;
+            auto flush = [&]()
+            {
+                if (run.size() >= 2)
+                {
+                    GCode::SmoothPath piece(1, el);
+                    piece.front().path = run;
+                    emit_pass(piece, remainder, hf, false);
+                }
+                run.clear();
+            };
+            for (const Geometry::ArcWelder::Segment &seg : el.path)
+            {
+                if (bayer_keeps(seg.point, fraction))
+                {
+                    if (run.empty() && have_prev)
+                        run.push_back(prev);
+                    run.push_back(seg);
+                }
+                else
+                {
+                    flush();
+                }
+                prev = seg;
+                have_prev = true;
+            }
+            flush();
+        }
+    }
+
+    for (int i = n_full - 1; i >= 0; --i)
+    {
+        const double drop = i * pass_h;
+        const double t = (layer_h - drop) / layer_h;
+        const float hf = float(1.0 - i);
+        const GCode::SmoothPath path = (lower != nullptr) ? morph_toward_lower(smooth_path, *lower, t) : smooth_path;
+        emit_pass(path, pass_h, hf, last_is_loop && i == 0);
+    }
+    return true;
+}
+
 std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
                                                std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters,
                                                const InstanceToPrint &print_instance)
@@ -4858,8 +5077,15 @@ std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
         const bool is_valid_loop = perimeter.extrusion_entity->is_loop() &&
                                    perimeter.wipe_offset <= perimeter.smooth_path.size();
         const std::size_t safe_wipe_offset = is_valid_loop ? perimeter.wipe_offset : 0;
-        gcode += this->extrude_smooth_path(perimeter.smooth_path, is_valid_loop, comment_perimeter, speed,
-                                           safe_wipe_offset);
+        const bool smooth_outer = perimeter.extrusion_entity->role().is_external_perimeter() &&
+                                  !perimeter.extrusion_entity->role().is_bridge();
+        if (!smooth_outer ||
+            !this->extrude_smooth_outer_wall(perimeter.smooth_path, is_valid_loop, comment_perimeter, speed,
+                                            safe_wipe_offset, gcode))
+        {
+            gcode += this->extrude_smooth_path(perimeter.smooth_path, is_valid_loop, comment_perimeter, speed,
+                                               safe_wipe_offset);
+        }
         this->m_travel_obstacle_tracker.mark_extruded(perimeter.extrusion_entity,
                                                       print_instance.object_layer_to_print_id,
                                                       print_instance.instance_id);

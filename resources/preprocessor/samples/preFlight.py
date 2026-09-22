@@ -427,6 +427,7 @@ class Settings:
     only_one_perimeter_first_layer: str  # bool (0/1)
     only_retract_when_crossing_perimeters: str  # bool (0/1)
     ooze_prevention: str  # bool (0/1)
+    outer_wall_layer_height: str  # float
     output_filename_format: str
     over_bridge_speed: str  # float or percentage
     overhang_fan_speed_0: str  # semicolon-separated ints

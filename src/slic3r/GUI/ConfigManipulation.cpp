@@ -795,7 +795,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
                     "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed", "thin_walls",
                     "overhangs", "seam_position",
                     "staggered_inner_seams", "seam_type", "seam_notch_width", "seam_notch_angle",
-                    "external_perimeters_first", "external_perimeter_extrusion_width", "perimeter_speed",
+                    "external_perimeters_first", "outer_wall_layer_height", "external_perimeter_extrusion_width",
+                    "perimeter_speed",
                     "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
         toggle_field(el, have_perimeters);
 

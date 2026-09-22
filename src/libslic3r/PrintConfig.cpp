@@ -1441,6 +1441,21 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("outer_wall_layer_height", coFloat);
+    def->label = L("Outer wall layer height");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Print external perimeters as several thinner passes at this height, the same idea as the "
+                     "Smoothificator post-process. 0 uses the normal layer height. Vertical walls are split into "
+                     "equal passes that add up to the layer. On curved tops the passes follow the slope between this "
+                     "layer and the one below, stepped by this height, and any leftover fraction of a step is "
+                     "dithered along the wall so the average surface tracks the curve. Works best with external "
+                     "perimeters printed first.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("extra_perimeters", coBool);
     def->label = L("Extra perimeters if needed");
     def->category = L("Layers and Perimeters");

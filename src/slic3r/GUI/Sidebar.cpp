@@ -1707,6 +1707,7 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     {
         auto *layer_group = CreateFlatStaticBoxSizer(content, _L("Layer height"));
         CreateSettingRow(content, layer_group, "layer_height", _L("Layer height"));
+        CreateSettingRow(content, layer_group, "outer_wall_layer_height", _L("Outer wall layer height"));
         CreateSettingRow(content, layer_group, "first_layer_height", _L("First layer height"));
         CreateSettingRow(content, layer_group, "color_mixing_base_layers", _L("Color mixing base layers"));
         CreateSettingRow(content, layer_group, "color_mixing_base_extruder", _L("Color mixing base filament"));
@@ -3101,6 +3102,7 @@ void PrintSettingsPanel::ApplyToggleLogic()
           "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed", "thin_walls",
           "overhangs", "seam_position",
           "staggered_inner_seams", "seam_type", "seam_notch_width", "seam_notch_angle", "external_perimeters_first",
+          "outer_wall_layer_height",
           "external_perimeter_extrusion_width", "perimeter_speed", "small_perimeter_speed", "external_perimeter_speed",
           "enable_dynamic_overhang_speeds"})
         ToggleOption(el, have_perimeters);
