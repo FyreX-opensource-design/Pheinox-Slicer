@@ -200,6 +200,10 @@ struct ExtrusionAttributes : ExtrusionFlow
     // OVerhangAttributes are currently computed for perimeters if dynamic overhangs are enabled.
     // They are used to control fan and print speed in export.
     std::optional<OverhangAttributes> overhang_attributes;
+    // Set for custom wave-overhang paths so export can apply wave-specific modifiers without a new role.
+    bool wave_overhang{false};
+    // Set only for the unsupported wave material lines themselves, excluding preserved shell perimeters.
+    bool wave_overhang_material{false};
     // Set only for external and internal perimeters. The external perimeter has value 0, the first internal perimeter has 1, and so on.
     std::optional<uint16_t> perimeter_index;
     // Identifies which contour feature (perimeter group from PerimeterOrder) this entity belongs to.
@@ -213,6 +217,7 @@ struct ExtrusionAttributes : ExtrusionFlow
 
 inline bool operator==(const ExtrusionAttributes &lhs, const ExtrusionAttributes &rhs)
 {
+    // wave_overhang is export-only metadata and must not perturb geometry-side path grouping.
     return static_cast<const ExtrusionFlow &>(lhs) == static_cast<const ExtrusionFlow &>(rhs) && lhs.role == rhs.role &&
            lhs.overhang_attributes == rhs.overhang_attributes;
 }

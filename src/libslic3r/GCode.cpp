@@ -5111,12 +5111,17 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
 {
     std::string gcode;
     const std::string_view description_bridge = path_attr.role.is_bridge() ? " (bridge)"sv : ""sv;
+    const bool use_wave_travel =
+        path_attr.wave_overhang && m_config.wave_overhang_travel_speed.value > 0;
 
     const bool has_active_instance{m_label_objects.has_active_instance()};
     if (m_writer.multiple_extruders && has_active_instance)
     {
         gcode += m_label_objects.maybe_change_instance(m_writer);
     }
+
+    if (use_wave_travel)
+        m_writer.set_travel_speed_override(m_config.wave_overhang_travel_speed.value);
 
     if (!this->last_position)
     {
@@ -5141,6 +5146,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
             [this]() { return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer); })};
         gcode += travel_gcode;
     }
+
+    if (use_wave_travel)
+        m_writer.set_travel_speed_override(0.);
 
     // compensate retraction
     gcode += this->unretract();
@@ -5201,7 +5209,13 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     }
 
     // calculate extrusion length per distance unit
+    // Volumetric velocity. mm^3 of plastic per mm of linear head motion. Used by the G-code generator.
     double e_per_mm = m_writer.extruder()->e_per_mm3() * path_attr.mm3_per_mm;
+    // Apply the correction only to emitted material volume for wave-overhang paths.
+    // Keep the geometric flow model unchanged so wave generation, spacing, and preview width
+    // continue to use the desired line width setting.
+    if (path_attr.wave_overhang_material && m_config.wave_overhang_flow_ratio.value > 0)
+        e_per_mm *= m_config.wave_overhang_flow_ratio.value;
     if (m_writer.extrusion_axis().empty())
         // gcfNoExtrusion
         e_per_mm = 0;
@@ -5735,6 +5749,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         }
     }
 
+    if (path_attr.wave_overhang && m_config.wave_overhang_print_speed.value > 0)
+        speed = m_config.wave_overhang_print_speed.value;
+
     // Cap speed with filament volumetric limit.
     // For interlocking perimeters, we skip the early cap_speed() call because path_attr.mm3_per_mm
     // contains the over-extruded volumetric flow which would incorrectly limit the base speed.
@@ -5867,6 +5884,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     if (over_bridge_speed_value > 0 && segment_over_bridge.size() > 1 && segment_over_bridge[1])
         F = std::round(over_bridge_speed_value * 60.0);
     inject_feedrate(gcode, m_writer.set_speed(F, flow_held ? "flow hold" : "", cooling_marker_setspeed_comments));
+
+    if (path_attr.wave_overhang)
+        dynamic_print_and_fan_speeds.fan_speed = float(std::clamp(m_config.wave_overhang_fan_speed.value, 0, 100));
 
     if (dynamic_print_and_fan_speeds.fan_speed >= 0 && !EXTRUDER_CONFIG(enable_manual_fan_speeds))
     {

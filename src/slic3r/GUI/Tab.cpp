@@ -2005,6 +2005,21 @@ void TabPrint::build()
     optgroup->append_single_option_line("extra_perimeters", category_path + "extra-perimeters-if-needed");
     optgroup->append_single_option_line("extra_perimeters_on_overhangs",
                                         category_path + "extra-perimeters-on-overhangs");
+    optgroup->append_single_option_line("wave_overhangs", category_path + "wave-overhangs");
+    optgroup->append_single_option_line("wave_overhangs_instead_of_bridges",
+                                        category_path + "wave-overhangs-instead-of-bridges");
+    optgroup->append_single_option_line("wave_overhang_outer_perimeters",
+                                        category_path + "wave-overhang-perimeters");
+    optgroup->append_single_option_line("wave_overhang_perimeter_overlap",
+                                        category_path + "wave-overhang-perimeter-overlap");
+    optgroup->append_single_option_line("wave_overhang_minimum_width", category_path + "minimum-wave-width");
+    optgroup->append_single_option_line("wave_overhang_pattern", category_path + "wave-overhang-pattern");
+    optgroup->append_single_option_line("wave_overhang_line_spacing", category_path + "wave-overhang-line-spacing");
+    optgroup->append_single_option_line("wave_overhang_line_width", category_path + "wave-overhang-line-width");
+    optgroup->append_single_option_line("wave_overhang_flow_ratio", category_path + "wave-overhang-flow-ratio");
+    optgroup->append_single_option_line("wave_overhang_print_speed", category_path + "wave-overhang-print-speed");
+    optgroup->append_single_option_line("wave_overhang_travel_speed", category_path + "wave-overhang-travel-speed");
+    optgroup->append_single_option_line("wave_overhang_fan_speed", category_path + "wave-overhang-fan-speed");
     optgroup->append_single_option_line("ensure_vertical_shell_thickness",
                                         category_path + "ensure-vertical-shell-thickness");
     optgroup->append_single_option_line("avoid_crossing_curled_overhangs",
@@ -2075,6 +2090,12 @@ void TabPrint::build()
     optgroup = page->new_optgroup_for_sidebar(L("Infill"));
     optgroup->append_single_option_line("fill_density", category_path + "fill-density");
     optgroup->append_single_option_line("fill_pattern", category_path + "fill-pattern");
+    optgroup->append_single_option_line("custom_infill_source", category_path + "custom-infill-source");
+    optgroup->append_single_option_line("custom_infill_equations", category_path + "custom-infill-equations");
+    optgroup->append_single_option_line("custom_infill_file", category_path + "custom-infill-file");
+    optgroup->append_single_option_line("custom_infill_tile_size", category_path + "custom-infill-tile-size");
+    optgroup->append_single_option_line("custom_infill_threshold", category_path + "custom-infill-threshold");
+    optgroup->append_single_option_line("custom_infill_angle", category_path + "custom-infill-angle");
     optgroup->append_single_option_line("solid_fill_pattern", category_path + "solid-fill-pattern");
     optgroup->append_single_option_line("top_fill_pattern", category_path + "top-fill-pattern");
     optgroup->append_single_option_line("bottom_fill_pattern", category_path + "bottom-fill-pattern");
@@ -2169,6 +2190,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("support_material_xy_spacing",
                                         category_path + "xy-separation-between-an-object-and-its-support");
     optgroup->append_single_option_line("dont_support_bridges", category_path + "dont-support-bridges");
+    optgroup->append_single_option_line("support_remaining_areas_after_wave_overhangs",
+                                        category_path + "dont-support-wave-overhangs");
     // This option was only enabled for soluble supports, but organic supports always
     // synchronize with object layers, and our multi-type support implementation
     // handles layer synchronization automatically. Removing to reduce UI clutter.

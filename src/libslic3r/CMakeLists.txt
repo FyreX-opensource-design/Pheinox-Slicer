@@ -45,6 +45,8 @@ set(SLIC3R_SOURCES
     BoundingBox.hpp
     BridgeDetector.cpp
     BridgeDetector.hpp
+    WaveOverhangs.cpp
+    WaveOverhangs.hpp
     Brim.cpp
     Brim.hpp
     BuildVolume.cpp
@@ -119,6 +121,8 @@ set(SLIC3R_SOURCES
     Fill/FillHoneycomb.hpp
     Fill/FillGyroid.cpp
     Fill/FillGyroid.hpp
+    Fill/FillCustom.cpp
+    Fill/FillCustom.hpp
     Fill/FillPlanePath.cpp
     Fill/FillPlanePath.hpp
     Fill/FillLine.cpp

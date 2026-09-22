@@ -320,6 +320,14 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
                                                          float(layerm->flow(frExternalPerimeter).scaled_width()),
                                                          overhangs);
                     }
+                    if (config.support_remaining_areas_after_wave_overhangs.value)
+                    {
+                        Polygons wave_filled_areas;
+                        for (const LayerRegion *layerm : current_layer.regions())
+                            append(wave_filled_areas, layerm->wave_overhang_filled_area());
+                        if (!wave_filled_areas.empty())
+                            overhangs = diff(overhangs, union_(wave_filled_areas));
+                    }
                 }
                 //check_self_intersections(overhangs, "generate_overhangs1");
                 if (!enforcers_layers.empty() && !enforcers_layers[layer_id].empty())

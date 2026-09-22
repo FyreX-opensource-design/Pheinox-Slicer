@@ -120,7 +120,9 @@ void process_arachne(
     // Gaps without the thin walls
     ExtrusionEntityCollection &out_gap_fill,
     // Infills without the gap fills
-    ExPolygons &out_fill_expolygons);
+    ExPolygons &out_fill_expolygons,
+    // Wave overhang support mask (filled regions that should not get auto supports)
+    Polygons &out_wave_overhang_filled_area);
 
 void process_athena(
     // Inputs:
@@ -133,7 +135,9 @@ void process_athena(
     // Gaps without the thin walls
     ExtrusionEntityCollection &out_gap_fill,
     // Infills without the gap fills
-    ExPolygons &out_fill_expolygons);
+    ExPolygons &out_fill_expolygons,
+    // Wave overhang support mask (filled regions that should not get auto supports)
+    Polygons &out_wave_overhang_filled_area);
 
 // nominal_mm3_per_mm is the volumetric baseline for the flow-hold ratio; 0 derives it from
 // `flow`. Pass the configured feature flow when `flow` itself has already been width-adjusted

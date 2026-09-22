@@ -202,7 +202,8 @@ static const t_config_enum_values s_keys_map_InfillPattern{{"rectilinear", ipRec
                                                            {"adaptivecubic", ipAdaptiveCubic},
                                                            {"supportcubic", ipSupportCubic},
                                                            {"lightning", ipLightning},
-                                                           {"zigzag", ipZigZag}};
+                                                           {"zigzag", ipZigZag},
+                                                           {"custom", ipCustom}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
 static const t_config_enum_values s_keys_map_IroningType{{"top", int(IroningType::TopSurfaces)},
@@ -384,6 +385,20 @@ static const t_config_enum_values s_keys_map_SerpentineAimType{
     {"perpendicular", int(satPerpendicular)},
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SerpentineAimType)
+
+static const t_config_enum_values s_keys_map_WaveOverhangPattern{
+    {"monotonic", int(WaveOverhangPattern::Monotonic)},
+    {"zigzag", int(WaveOverhangPattern::ZigZag)},
+    {"smart", int(WaveOverhangPattern::Smart)},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WaveOverhangPattern)
+
+static const t_config_enum_values s_keys_map_CustomInfillSource{
+    {"equation", int(CustomInfillSource::Equation)},
+    {"image", int(CustomInfillSource::Image)},
+    {"mesh", int(CustomInfillSource::Mesh)},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CustomInfillSource)
 
 static void assign_printer_technology_to_unknown(t_optiondef_map &options, PrinterTechnology printer_technology)
 {
@@ -1443,6 +1458,123 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("wave_overhangs", coBool);
+    def->label = L("Use wave overhangs (Experimental)");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Detect the same unsupported overhang regions as extra perimeters on overhangs, "
+                     "but replace that fill with wave-based overhang toolpaths while keeping the final perimeter pass.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("wave_overhangs_instead_of_bridges", coBool);
+    def->label = L("Use wave overhangs instead of bridges");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("When enabled, wave overhangs take priority over normal bridge generation for overhanging "
+                     "bottom surfaces. When disabled, ordinary bridges may still be kept in simple bridge-friendly "
+                     "regions instead of generating wave paths.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("wave_overhang_outer_perimeters", coInt);
+    def->label = L("Wave overhang perimeters");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Total number of perimeter passes to keep over wave-overhang regions. Values above the local "
+                     "perimeter count for a region are capped to that region's actual perimeter count.");
+    def->min = 1;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("wave_overhang_perimeter_overlap", coFloat);
+    def->label = L("Wave overhang perimeter overlap");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Extends the wave propagation boundary toward nearby perimeter lines so the last wave sits "
+                     "closer to the kept perimeter. This reduces the gap between wave lines and perimeter shells.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("wave_overhang_minimum_width", coFloat);
+    def->label = L("Minimum wave width");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("If a narrow neck in the wave region is smaller than this width, a thin split is inserted "
+                     "there before propagation. Larger values split more aggressively.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.7));
+
+    def = this->add("wave_overhang_pattern", coEnum);
+    def->label = L("Wave overhang pattern");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Controls whether wave-overhang tracks are printed one direction at a time, connected into a "
+                     "back-and-forth meander, or started from the better-supported end of each new wave line.");
+    def->set_enum<WaveOverhangPattern>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
+        {"monotonic", L("Monotonic")},
+        {"zigzag", L("Zig Zag")},
+        {"smart", L("Smart")},
+    });
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionEnum<WaveOverhangPattern>(WaveOverhangPattern::Smart));
+
+    def = this->add("wave_overhang_line_spacing", coFloat);
+    def->label = L("Wave overhang line spacing");
+    def->category = L("Extrusion Width");
+    def->tooltip = L("Centerline spacing between adjacent wave-overhang lines. Smaller than the line width creates "
+                     "overlap. Set to 0 to use the default overhang spacing.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.35));
+
+    def = this->add("wave_overhang_line_width", coFloat);
+    def->label = L("Wave overhang line width");
+    def->category = L("Extrusion Width");
+    def->tooltip = L("Extrusion width used for wave-overhang paths. Larger than the line spacing creates intentional "
+                     "overlap between adjacent waves. Set to 0 to use the default overhang extrusion width.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
+    def = this->add("wave_overhang_flow_ratio", coFloat);
+    def->label = L("Wave overhang flow ratio");
+    def->category = L("Flow");
+    def->tooltip = L("Flow ratio applied only to the unsupported wave-overhang material lines. This can help "
+                     "compensate for the non-standard teardrop-like bead shape these lines form in real prints.");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(1));
+
+    def = this->add("wave_overhang_print_speed", coFloat);
+    def->label = L("Wave overhang print speed");
+    def->category = L("Speed");
+    def->tooltip = L("Print speed used for wave-overhang extrusion paths.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(2));
+
+    def = this->add("wave_overhang_travel_speed", coFloat);
+    def->label = L("Wave overhang travel speed");
+    def->category = L("Speed");
+    def->tooltip = L("Travel speed used for moves between wave-overhang lines.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(40));
+
+    def = this->add("wave_overhang_fan_speed", coInt);
+    def->label = L("Wave overhang fan speed");
+    def->category = L("Cooling");
+    def->tooltip = L("Fan speed enforced while printing wave-overhang paths.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionInt(100));
+
     def = this->add("extruder", coInt);
     def->label = L("Extruder");
     def->category = L("Extruders");
@@ -2023,8 +2155,77 @@ void PrintConfigDef::init_fff_params()
         {"adaptivecubic", L("Adaptive Cubic")},
         {"supportcubic", L("Support Cubic")},
         {"lightning", L("Lightning")},
-        {"zigzag", L("Zig Zag")}});
+        {"zigzag", L("Zig Zag")},
+        {"custom", L("Custom")}});
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipStars));
+
+    def = this->add("custom_infill_source", coEnum);
+    def->label = L("Custom infill source");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "How the Custom sparse-infill pattern is generated: mathematical equations, a PNG/SVG image tile, "
+        "or a 3D model tiled through the volume.");
+    def->set_enum<CustomInfillSource>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
+        {"equation", L("Graph equation(s)")},
+        {"image", L("PNG / SVG image")},
+        {"mesh", L("Model file (tiled)")},
+    });
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<CustomInfillSource>(CustomInfillSource::Equation));
+
+    def = this->add("custom_infill_equations", coString);
+    def->label = L("Custom infill equations");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "One expression per line. Each expression is an implicit surface f(x,y) or f(x,y,z) whose iso-contour "
+        "f = threshold is extruded. Coordinates are in millimeters relative to the object origin. "
+        "Supported: + - * / ^, parentheses, sin cos tan abs sqrt min max floor ceil, pi, and variables x y z. "
+        "Example: sin(x) + sin(y)\n"
+        "Example (3D): sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 8;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString("sin(x) + sin(y)"));
+
+    def = this->add("custom_infill_file", coString);
+    def->label = L("Custom infill file");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "Path to a PNG (8-bit grayscale preferred), SVG, or mesh (STL/OBJ/3MF/AMF/STEP) used as the Custom "
+        "infill pattern. The pattern is tiled across the XY plane using the tile size.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("custom_infill_tile_size", coFloat);
+    def->label = L("Custom infill tile size");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "Period of the custom pattern in millimeters. For equations this scales x/y/z (period ≈ 2π·tile/2π = tile "
+        "when using sin/cos of x). For images and meshes this is the XY tile width (height follows aspect ratio).");
+    def->sidetext = L("mm");
+    def->min = 0.1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.));
+
+    def = this->add("custom_infill_threshold", coFloat);
+    def->label = L("Custom infill threshold");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "Iso-level for equation contours (f = threshold), or grayscale cutoff for PNG (0 = black, 1 = white). "
+        "Ignored for SVG stroke paths and mesh slices.");
+    def->min = -10.;
+    def->max = 10.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("custom_infill_angle", coFloat);
+    def->label = L("Custom infill angle");
+    def->category = L("Infill");
+    def->tooltip = L("Extra rotation applied to the custom pattern in the XY plane, in degrees.");
+    def->sidetext = L("°");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("solid_fill_pattern", coEnum);
     def->label = L("Solid fill pattern");
@@ -4558,6 +4759,14 @@ void PrintConfigDef::init_fff_params()
                      "supports are enabled; painted supports are always placed exactly where painted.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_remaining_areas_after_wave_overhangs", coBool);
+    def->label = L("Don't support wave overhangs");
+    def->category = L("Support material");
+    def->tooltip = L("When wave overhangs are enabled, generate supports only for overhang areas that were not "
+                     "filled by propagated wave toolpaths. Explicit support enforcers still apply normally.");
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("support_material_contact_distance", coEnum);
     def->label = L("Top contact Z distance");

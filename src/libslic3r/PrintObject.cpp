@@ -1002,7 +1002,11 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
             steps.emplace_back(posSupportMaterial);
         }
         else if (opt_key == "perimeters" || opt_key == "extra_perimeters" ||
-                 opt_key == "extra_perimeters_on_overhangs" || opt_key == "first_layer_extrusion_width" ||
+                 opt_key == "extra_perimeters_on_overhangs" || opt_key == "wave_overhangs" ||
+                 opt_key == "wave_overhangs_instead_of_bridges" || opt_key == "wave_overhang_outer_perimeters" ||
+                 opt_key == "wave_overhang_perimeter_overlap" || opt_key == "wave_overhang_minimum_width" ||
+                 opt_key == "wave_overhang_pattern" || opt_key == "wave_overhang_line_spacing" ||
+                 opt_key == "wave_overhang_line_width" || opt_key == "first_layer_extrusion_width" ||
                  opt_key == "perimeter_extrusion_width" || opt_key == "infill_overlap" ||
                  opt_key == "external_perimeters_first" || opt_key == "arc_fitting" ||
                  opt_key == "top_one_perimeter_type" || opt_key == "only_one_perimeter_first_layer" ||

@@ -41,6 +41,7 @@
 #include "FillRectilinear.hpp"
 #include "FillLightning.hpp"
 #include "FillEnsuring.hpp"
+#include "FillCustom.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -241,6 +242,8 @@ static const char *dbg_pattern(InfillPattern p)
         return "Ensuring";
     case ipZigZag:
         return "ZigZag";
+    case ipCustom:
+        return "Custom";
     default:
         return "UNKNOWN";
     }
@@ -1805,6 +1808,13 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                     fill_ensuring->print_region_config = &m_regions[surface_fill.region_id]->region().config();
                 }
 
+                if (surface_fill.params.pattern == ipCustom)
+                {
+                    auto *fill_custom = dynamic_cast<FillCustom *>(f.get());
+                    assert(fill_custom != nullptr);
+                    fill_custom->print_region_config = &m_regions[surface_fill.region_id]->region().config();
+                }
+
                 // calculate flow spacing for infill pattern generation
                 bool using_internal_flow = !surface_fill.surface.is_solid() && !surface_fill.params.bridge;
                 double link_max_length = 0.;
@@ -2368,6 +2378,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipArchimedeanChords:
         case ipOctagramSpiral:
         case ipZigZag:
+        case ipCustom:
             break;
         }
 
@@ -2386,6 +2397,12 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
 
         if (surface_fill.params.pattern == ipLightning)
             dynamic_cast<FillLightning::Filler *>(f.get())->generator = lightning_generator;
+
+        if (surface_fill.params.pattern == ipCustom) {
+            auto *fill_custom = dynamic_cast<FillCustom *>(f.get());
+            assert(fill_custom != nullptr);
+            fill_custom->print_region_config = &m_regions[surface_fill.region_id]->region().config();
+        }
 
         // calculate flow spacing for infill pattern generation
         double link_max_length = 0.;

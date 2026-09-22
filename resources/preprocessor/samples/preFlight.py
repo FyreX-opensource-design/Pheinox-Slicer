@@ -218,6 +218,11 @@ class Settings:
     cooling_tube_retraction: str  # float
     counterbore_bridge_layers: str  # int
     currency_symbol: str
+    custom_infill_angle: str  # float
+    custom_infill_equations: str
+    custom_infill_file: str
+    custom_infill_threshold: str  # float
+    custom_infill_tile_size: str  # float
     custom_parameters_filament: str  # semicolon-separated
     custom_parameters_print: str
     custom_parameters_printer: str
@@ -545,6 +550,7 @@ class Settings:
     support_material_threshold: str  # int
     support_material_with_sheath: str  # bool (0/1)
     support_material_xy_spacing: str  # float or percentage
+    support_remaining_areas_after_wave_overhangs: str  # bool (0/1)
     support_tree_angle: str  # float
     support_tree_angle_slow: str  # float
     support_tree_branch_diameter: str  # float
@@ -583,6 +589,17 @@ class Settings:
     wall_transition_angle: str  # float
     wall_transition_filter_deviation: str  # float or percentage
     wall_transition_length: str  # float or percentage
+    wave_overhang_fan_speed: str  # int
+    wave_overhang_flow_ratio: str  # float
+    wave_overhang_line_spacing: str  # float
+    wave_overhang_line_width: str  # float
+    wave_overhang_minimum_width: str  # float
+    wave_overhang_outer_perimeters: str  # int
+    wave_overhang_perimeter_overlap: str  # float
+    wave_overhang_print_speed: str  # float
+    wave_overhang_travel_speed: str  # float
+    wave_overhangs: str  # bool (0/1)
+    wave_overhangs_instead_of_bridges: str  # bool (0/1)
     wipe: str  # semicolon-separated bools
     wipe_extend: str  # semicolon-separated bools
     wipe_into_infill: str  # bool (0/1)

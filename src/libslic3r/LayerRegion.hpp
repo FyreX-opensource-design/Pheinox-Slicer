@@ -132,6 +132,9 @@ public:
     // collection of polylines representing the unsupported bridge edges
     [[nodiscard]] const Polylines &unsupported_bridge_edges() const { return m_unsupported_bridge_edges; }
 
+    // Regions filled by wave overhang toolpaths (used to suppress auto supports).
+    [[nodiscard]] const Polygons &wave_overhang_filled_area() const { return m_wave_overhang_filled_area; }
+
     // ordered collection of extrusion paths/loops to build all perimeters
     // (this collection contains only ExtrusionEntityCollection objects)
     [[nodiscard]] const ExtrusionEntityCollection &perimeters() const { return m_perimeters; }
@@ -222,6 +225,8 @@ private:
     ExPolygons m_fill_expolygons_composite;
     // and their bounding boxes
     BoundingBoxes m_fill_expolygons_composite_bboxes;
+    // Wave overhang filled mask for support generation.
+    Polygons m_wave_overhang_filled_area;
 
     // Collection of surfaces for infill generation, created by splitting m_slices by m_fill_expolygons.
     SurfaceCollection m_fill_surfaces;

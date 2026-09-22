@@ -253,6 +253,7 @@ enum InfillPattern : int
     ipLightning,
     ipEnsuring,
     ipZigZag,
+    ipCustom,
     ipCount,
 };
 
@@ -350,6 +351,21 @@ enum ColorMixingBaseExtruder
     cmbeDarkest,       // auto-pick the darkest loaded filament (hides dither artifacts best)
     cmbeLightest,      // auto-pick the brightest loaded filament
     cmbeVolumeDefault, // use whatever extruder the volume is assigned to
+};
+
+enum class WaveOverhangPattern : int
+{
+    Monotonic,
+    ZigZag,
+    Smart
+};
+
+// Source for the custom sparse-infill generator (ipCustom).
+enum class CustomInfillSource : int
+{
+    Equation, // one or more f(x,y) / f(x,y,z) expressions (iso-contours)
+    Image,    // PNG (grayscale) or SVG tiled in XY
+    Mesh,     // STL/OBJ/3MF/etc. tiled and sliced per layer
 };
 
 enum SeamNotchType
@@ -528,6 +544,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopOnePerimeterType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(EnsureVerticalShellThickness)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CoolingSlowdownLogicType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FanSpinupResponseType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WaveOverhangPattern)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CustomInfillSource)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -972,6 +990,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool, support_material_auto))
     // Direction of the support pattern (in XY plane).`
     ((ConfigOptionFloat, support_material_angle))((ConfigOptionBool, support_material_buildplate_only))(
+        (ConfigOptionBool, support_remaining_areas_after_wave_overhangs))(
         (ConfigOptionEnum<SupportTopContactGap>,
          support_material_contact_distance))((ConfigOptionFloat, support_material_contact_distance_custom))((
         ConfigOptionPercent, support_material_top_contact_extrusion_width))((ConfigOptionEnum<SupportBottomContactGap>,
@@ -1032,9 +1051,19 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, overhang_speed_0))((ConfigOptionFloatOrPercent, overhang_speed_1))(
         (ConfigOptionFloatOrPercent, overhang_speed_2))((ConfigOptionFloatOrPercent, overhang_speed_3))(
         (ConfigOptionBool, external_perimeters_first))((ConfigOptionBool, extra_perimeters))(
-        (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionFloat, fill_angle))(
+        (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(
+        (ConfigOptionBool, wave_overhangs_instead_of_bridges))((ConfigOptionInt, wave_overhang_outer_perimeters))(
+        (ConfigOptionFloat, wave_overhang_perimeter_overlap))((ConfigOptionFloat, wave_overhang_minimum_width))(
+        (ConfigOptionEnum<WaveOverhangPattern>, wave_overhang_pattern))(
+        (ConfigOptionFloat, wave_overhang_line_spacing))((ConfigOptionFloat, wave_overhang_line_width))(
+        (ConfigOptionFloat, wave_overhang_flow_ratio))((ConfigOptionFloat, wave_overhang_print_speed))(
+        (ConfigOptionFloat, wave_overhang_travel_speed))((ConfigOptionFloat, fill_angle))(
         (ConfigOptionPercent, fill_density))((ConfigOptionEnum<InfillPattern>,
-                                              fill_pattern))((ConfigOptionEnum<FuzzySkinType>, fuzzy_skin))(
+                                              fill_pattern))((ConfigOptionEnum<CustomInfillSource>,
+                                                              custom_infill_source))(
+        (ConfigOptionString, custom_infill_equations))((ConfigOptionString, custom_infill_file))(
+        (ConfigOptionFloat, custom_infill_tile_size))((ConfigOptionFloat, custom_infill_threshold))(
+        (ConfigOptionFloat, custom_infill_angle))((ConfigOptionEnum<FuzzySkinType>, fuzzy_skin))(
         (ConfigOptionFloat, fuzzy_skin_thickness))((ConfigOptionFloat, fuzzy_skin_point_dist))(
         (ConfigOptionBool, fuzzy_skin_first_layer))((ConfigOptionEnum<FuzzySkinNoiseType>, fuzzy_skin_noise_type))(
         (ConfigOptionEnum<FuzzySkinMode>, fuzzy_skin_mode))((ConfigOptionFloat, fuzzy_skin_scale))(
@@ -1207,7 +1236,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionBool, avoid_crossing_perimeters))((ConfigOptionFloatOrPercent,
                                                         avoid_crossing_perimeters_max_detour))(
         (ConfigOptionPoints, bed_shape))((ConfigOptionInts, bed_temperature))((ConfigOptionFloat, bridge_acceleration))(
-        (ConfigOptionInts, bridge_fan_speed))((ConfigOptionBools, enable_manual_fan_speeds))(
+        (ConfigOptionInts, bridge_fan_speed))((ConfigOptionInt, wave_overhang_fan_speed))(
+        (ConfigOptionBools, enable_manual_fan_speeds))(
         (ConfigOptionInts, manual_fan_speed_external_perimeter))((ConfigOptionInts, manual_fan_speed_internal_infill))(
         (ConfigOptionInts, manual_fan_speed_interlocking_perimeter))((ConfigOptionInts, manual_fan_speed_ironing))(
         (ConfigOptionInts, manual_fan_speed_overhang_perimeter))((ConfigOptionInts, manual_fan_speed_perimeter))(

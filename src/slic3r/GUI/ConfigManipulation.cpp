@@ -788,11 +788,24 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
 void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
 {
     bool have_perimeters = config->opt_int("perimeters") > 0;
-    for (auto el : {"extra_perimeters", "extra_perimeters_on_overhangs", "thin_walls", "overhangs", "seam_position",
+    for (auto el : {"extra_perimeters", "extra_perimeters_on_overhangs", "wave_overhangs",
+                    "wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",
+                    "wave_overhang_perimeter_overlap", "wave_overhang_minimum_width", "wave_overhang_pattern",
+                    "wave_overhang_line_spacing", "wave_overhang_line_width", "wave_overhang_flow_ratio",
+                    "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed", "thin_walls",
+                    "overhangs", "seam_position",
                     "staggered_inner_seams", "seam_type", "seam_notch_width", "seam_notch_angle",
                     "external_perimeters_first", "external_perimeter_extrusion_width", "perimeter_speed",
                     "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
         toggle_field(el, have_perimeters);
+
+    bool have_wave_overhangs = have_perimeters && config->opt_bool("wave_overhangs");
+    for (auto el : {"wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",
+                    "wave_overhang_perimeter_overlap", "wave_overhang_minimum_width", "wave_overhang_pattern",
+                    "wave_overhang_line_spacing", "wave_overhang_line_width", "wave_overhang_flow_ratio",
+                    "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed",
+                    "support_remaining_areas_after_wave_overhangs"})
+        toggle_field(el, have_wave_overhangs);
 
     bool seam_notch_active = have_perimeters && config->opt_enum<SeamNotchType>("seam_type") != sntRegular;
     toggle_field("seam_notch_width", seam_notch_active);
@@ -812,6 +825,18 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     {
         toggle_field(el, have_infill);
     }
+
+    const bool have_custom_infill =
+        have_infill && config->option<ConfigOptionEnum<InfillPattern>>("fill_pattern")->value == ipCustom;
+    toggle_field("custom_infill_source", have_custom_infill);
+    const CustomInfillSource custom_src =
+        config->option<ConfigOptionEnum<CustomInfillSource>>("custom_infill_source")->value;
+    toggle_field("custom_infill_equations", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    toggle_field("custom_infill_file",
+                 have_custom_infill &&
+                     (custom_src == CustomInfillSource::Image || custom_src == CustomInfillSource::Mesh));
+    for (auto el : {"custom_infill_tile_size", "custom_infill_threshold", "custom_infill_angle"})
+        toggle_field(el, have_custom_infill);
 
     toggle_field("infill_every_layers", have_infill && !has_automatic_infill_combination);
     toggle_field("automatic_infill_combination_max_layer_height", have_infill && has_automatic_infill_combination);

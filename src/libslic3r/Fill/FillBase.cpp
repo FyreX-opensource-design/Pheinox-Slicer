@@ -32,6 +32,7 @@
 #include "FillHoneycomb.hpp"
 #include "Fill3DHoneycomb.hpp"
 #include "FillGyroid.hpp"
+#include "FillCustom.hpp"
 #include "FillPlanePath.hpp"
 #include "FillLine.hpp"
 #include "FillRectilinear.hpp"
@@ -97,6 +98,8 @@ Fill *Fill::new_from_type(const InfillPattern type)
         return new FillEnsuring();
     case ipZigZag:
         return new FillZigZag();
+    case ipCustom:
+        return new FillCustom();
     default:
         throw Slic3r::InvalidArgument("unknown type");
     }

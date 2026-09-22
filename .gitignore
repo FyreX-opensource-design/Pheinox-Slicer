@@ -2,4 +2,6 @@
 /build/
 /build_debug/
 deps/build/
+deps/build-*/
 deps/destdir/
+deps/.pkg_cache/

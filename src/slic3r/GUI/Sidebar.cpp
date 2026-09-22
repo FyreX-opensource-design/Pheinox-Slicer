@@ -1767,6 +1767,20 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         auto *quality_group = CreateFlatStaticBoxSizer(content, _L("Quality"));
         CreateSettingRow(content, quality_group, "extra_perimeters", _L("Extra perimeters if needed"));
         CreateSettingRow(content, quality_group, "extra_perimeters_on_overhangs", _L("Extra perimeters on overhangs"));
+        CreateSettingRow(content, quality_group, "wave_overhangs", _L("Use wave overhangs"));
+        CreateSettingRow(content, quality_group, "wave_overhangs_instead_of_bridges",
+                         _L("Use wave overhangs instead of bridges"));
+        CreateSettingRow(content, quality_group, "wave_overhang_outer_perimeters", _L("Wave overhang perimeters"));
+        CreateSettingRow(content, quality_group, "wave_overhang_perimeter_overlap",
+                         _L("Wave overhang perimeter overlap"));
+        CreateSettingRow(content, quality_group, "wave_overhang_minimum_width", _L("Minimum wave width"));
+        CreateSettingRow(content, quality_group, "wave_overhang_pattern", _L("Wave overhang pattern"));
+        CreateSettingRow(content, quality_group, "wave_overhang_line_spacing", _L("Wave overhang line spacing"));
+        CreateSettingRow(content, quality_group, "wave_overhang_line_width", _L("Wave overhang line width"));
+        CreateSettingRow(content, quality_group, "wave_overhang_flow_ratio", _L("Wave overhang flow ratio"));
+        CreateSettingRow(content, quality_group, "wave_overhang_print_speed", _L("Wave overhang print speed"));
+        CreateSettingRow(content, quality_group, "wave_overhang_travel_speed", _L("Wave overhang travel speed"));
+        CreateSettingRow(content, quality_group, "wave_overhang_fan_speed", _L("Wave overhang fan speed"));
         CreateSettingRow(content, quality_group, "ensure_vertical_shell_thickness",
                          _L("Ensure vertical shell thickness"));
         CreateSettingRow(content, quality_group, "avoid_crossing_curled_overhangs",
@@ -1852,6 +1866,12 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
         auto *infill_group = CreateFlatStaticBoxSizer(content, _L("Infill"));
         CreateSettingRow(content, infill_group, "fill_density", _L("Fill density"));
         CreateSettingRow(content, infill_group, "fill_pattern", _L("Fill pattern"));
+        CreateSettingRow(content, infill_group, "custom_infill_source", _L("Custom infill source"));
+        CreateSettingRow(content, infill_group, "custom_infill_equations", _L("Custom infill equations"));
+        CreateSettingRow(content, infill_group, "custom_infill_file", _L("Custom infill file"));
+        CreateSettingRow(content, infill_group, "custom_infill_tile_size", _L("Custom infill tile size"));
+        CreateSettingRow(content, infill_group, "custom_infill_threshold", _L("Custom infill threshold"));
+        CreateSettingRow(content, infill_group, "custom_infill_angle", _L("Custom infill angle"));
         CreateSettingRow(content, infill_group, "solid_fill_pattern", _L("Solid fill pattern"));
         CreateSettingRow(content, infill_group, "top_fill_pattern", _L("Top fill pattern"));
         CreateSettingRow(content, infill_group, "bottom_fill_pattern", _L("Bottom fill pattern"));
@@ -1998,6 +2018,8 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
         CreateSettingRow(content, opts_group, "support_material_buildplate_only", _L("Support on build plate only"));
         CreateSettingRow(content, opts_group, "support_material_xy_spacing", _L("XY separation"));
         CreateSettingRow(content, opts_group, "dont_support_bridges", _L("Don't support bridges"));
+        CreateSettingRow(content, opts_group, "support_remaining_areas_after_wave_overhangs",
+                         _L("Don't support wave overhangs"));
         sizer->Add(opts_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -3073,11 +3095,23 @@ void PrintSettingsPanel::ApplyToggleLogic()
     // Perimeter dependencies
     bool have_perimeters = config.opt_int("perimeters") > 0;
     for (const char *el :
-         {"extra_perimeters", "extra_perimeters_on_overhangs", "thin_walls", "overhangs", "seam_position",
+         {"extra_perimeters", "extra_perimeters_on_overhangs", "wave_overhangs", "wave_overhangs_instead_of_bridges",
+          "wave_overhang_outer_perimeters", "wave_overhang_perimeter_overlap", "wave_overhang_minimum_width",
+          "wave_overhang_pattern", "wave_overhang_line_spacing", "wave_overhang_line_width", "wave_overhang_flow_ratio",
+          "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed", "thin_walls",
+          "overhangs", "seam_position",
           "staggered_inner_seams", "seam_type", "seam_notch_width", "seam_notch_angle", "external_perimeters_first",
           "external_perimeter_extrusion_width", "perimeter_speed", "small_perimeter_speed", "external_perimeter_speed",
           "enable_dynamic_overhang_speeds"})
         ToggleOption(el, have_perimeters);
+
+    bool have_wave_overhangs = have_perimeters && config.opt_bool("wave_overhangs");
+    for (const char *el :
+         {"wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters", "wave_overhang_perimeter_overlap",
+          "wave_overhang_minimum_width", "wave_overhang_pattern", "wave_overhang_line_spacing",
+          "wave_overhang_line_width", "wave_overhang_flow_ratio", "wave_overhang_print_speed",
+          "wave_overhang_travel_speed", "wave_overhang_fan_speed", "support_remaining_areas_after_wave_overhangs"})
+        ToggleOption(el, have_wave_overhangs);
 
     bool seam_notch_active = have_perimeters && config.opt_enum<SeamNotchType>("seam_type") != sntRegular;
     ToggleOption("seam_notch_width", seam_notch_active);
@@ -3094,6 +3128,18 @@ void PrintSettingsPanel::ApplyToggleLogic()
     for (const char *el : {"fill_pattern", "solid_infill_every_layers", "solid_infill_below_area", "infill_extruder",
                            "infill_anchor_max", "automatic_infill_combination"})
         ToggleOption(el, have_infill);
+
+    const bool have_custom_infill =
+        have_infill && config.option<ConfigOptionEnum<InfillPattern>>("fill_pattern")->value == ipCustom;
+    ToggleOption("custom_infill_source", have_custom_infill);
+    const CustomInfillSource custom_src =
+        config.option<ConfigOptionEnum<CustomInfillSource>>("custom_infill_source")->value;
+    ToggleOption("custom_infill_equations", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    ToggleOption("custom_infill_file",
+                 have_custom_infill &&
+                     (custom_src == CustomInfillSource::Image || custom_src == CustomInfillSource::Mesh));
+    for (const char *el : {"custom_infill_tile_size", "custom_infill_threshold", "custom_infill_angle"})
+        ToggleOption(el, have_custom_infill);
 
     ToggleOption("infill_every_layers", have_infill && !has_automatic_infill_combination);
     ToggleOption("automatic_infill_combination_max_layer_height", have_infill && has_automatic_infill_combination);

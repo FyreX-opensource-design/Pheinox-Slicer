@@ -5,6 +5,9 @@ add_cmake_project(
     CMAKE_ARGS          
         -DTBB_BUILD_SHARED=${BUILD_SHARED_LIBS}
         -DTBB_TEST=OFF
+        # GCC 15+ false-positive -Werror=stringop-overflow on atomic<bool>::store
+        # in concurrent_monitor (oneTBB #2029); keep pin, don't treat as error.
+        -DTBB_STRICT=OFF
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DCMAKE_DEBUG_POSTFIX=_debug
 )

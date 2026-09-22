@@ -1481,6 +1481,10 @@ static inline std::tuple<Polygons, Polygons, Polygons, Polygons, float> detect_o
                 //FIXME Expensive, potentially not precise enough. Misses gap fill extrusions, which bridge.
                 remove_bridges_from_contacts(print_config, lower_layer, *layerm, fw, diff_polygons);
 
+            if (object_config.support_remaining_areas_after_wave_overhangs.value &&
+                !layerm->wave_overhang_filled_area().empty())
+                diff_polygons = diff(diff_polygons, layerm->wave_overhang_filled_area());
+
             if (diff_polygons.empty())
                 continue;
 

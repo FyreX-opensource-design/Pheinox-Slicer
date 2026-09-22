@@ -7,6 +7,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "PerimeterGenerator.hpp"
+#include "WaveOverhangs.hpp"
 #include "Serpentine.hpp"
 #include "PreciseWalls.hpp"
 #include "Arachne/WallToolPaths.hpp"
@@ -1781,6 +1782,169 @@ std::tuple<std::vector<ExtrusionPaths>, Polygons> generate_extra_perimeters_over
     return {extra_perims, diff(inset_overhang_area, inset_overhang_area_left_unfilled)};
 }
 
+std::tuple<std::vector<ExtrusionPaths>, Polygons> generate_overhang_toolpaths(
+    ExPolygons infill_area, const Polygons &lower_slices_polygons, const ExPolygons &lower_slices_raw,
+    int perimeter_count, int desired_wave_perimeters, const Flow &overhang_flow, double scaled_resolution,
+    const PrintRegionConfig &region_config, const PrintObjectConfig &object_config, const PrintConfig &print_config,
+    bool use_wave_overhangs, const double dbg_z)
+{
+    if (use_wave_overhangs)
+    {
+        const int additional_shell_count = std::max(0, desired_wave_perimeters - perimeter_count);
+        return WaveOverhangs::generate(infill_area, lower_slices_polygons, perimeter_count, additional_shell_count,
+                                       region_config.wave_overhang_perimeter_overlap.value,
+                                       region_config.wave_overhang_minimum_width.value,
+                                       region_config.wave_overhang_pattern.value,
+                                       region_config.wave_overhang_line_spacing.value,
+                                       region_config.wave_overhang_line_width.value, overhang_flow, scaled_resolution,
+                                       region_config.wave_overhangs_instead_of_bridges.value);
+    }
+
+    return generate_extra_perimeters_over_overhangs(infill_area, lower_slices_polygons, lower_slices_raw,
+                                                    perimeter_count, overhang_flow, scaled_resolution, object_config,
+                                                    print_config, dbg_z);
+}
+
+static ExPolygons expand_wave_target_area(const ExPolygons &infill_areas, int perimeter_count,
+                                          int desired_total_perimeters, coord_t perimeter_spacing)
+{
+    const int reclaimed_perimeters = std::max(0, perimeter_count - desired_total_perimeters);
+    if (reclaimed_perimeters <= 0)
+        return infill_areas;
+
+    return offset_ex(infill_areas, float(reclaimed_perimeters * perimeter_spacing));
+}
+
+static Polygons support_mask_from_wave_filled_area(const Polygons &filled_area, const Surface &surface,
+                                                   const PerimeterGenerator::Parameters &params,
+                                                   int desired_total_perimeters)
+{
+    if (filled_area.empty())
+        return {};
+
+    coord_t shell_width = 0;
+    if (desired_total_perimeters > 0)
+    {
+        shell_width = coord_t(0.5f * params.ext_perimeter_flow.scaled_width() +
+                              params.ext_perimeter_flow.scaled_spacing());
+        shell_width += params.perimeter_flow.scaled_spacing() * (desired_total_perimeters - 1);
+    }
+    const coord_t support_margin = std::max<coord_t>(1, params.ext_perimeter_flow.scaled_spacing() / 2);
+
+    Polygons supported_area =
+        intersection(expand(filled_area, float(shell_width + support_margin), jtRound, 0.), to_polygons(surface));
+
+    Polygons supported_area_no_holes;
+    ExPolygons supported_expolygons = union_ex(supported_area);
+    supported_area_no_holes.reserve(supported_expolygons.size());
+    for (const ExPolygon &expolygon : supported_expolygons)
+        supported_area_no_holes.push_back(expolygon.contour);
+
+    return supported_area_no_holes;
+}
+
+static bool should_replace_with_wave_path(const ExtrusionPath &path, uint16_t desired_total_perimeters)
+{
+    return path.role().is_perimeter() && path.attributes().perimeter_index.has_value() &&
+           *path.attributes().perimeter_index >= desired_total_perimeters;
+}
+
+static void subtract_wave_replaced_perimeters(const ExtrusionPath &path, const ExPolygons &clip_area,
+                                              uint16_t desired_total_perimeters, ExtrusionEntitiesPtr &out)
+{
+    if (!should_replace_with_wave_path(path, desired_total_perimeters))
+    {
+        out.emplace_back(new ExtrusionPath(path));
+        return;
+    }
+
+    ExtrusionEntityCollection remaining;
+    path.subtract_expolygons(clip_area, &remaining);
+    append(out, remaining.entities);
+    remaining.entities.clear();
+}
+
+static void subtract_wave_replaced_perimeters(ExtrusionEntity *entity, const ExPolygons &clip_area,
+                                              uint16_t desired_total_perimeters, ExtrusionEntitiesPtr &out)
+{
+    if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity))
+    {
+        ExtrusionEntitiesPtr filtered;
+        filtered.reserve(collection->entities.size());
+        for (ExtrusionEntity *child : collection->entities)
+            subtract_wave_replaced_perimeters(child, clip_area, desired_total_perimeters, filtered);
+        collection->entities.clear();
+        delete collection;
+
+        if (filtered.empty())
+            return;
+        if (filtered.size() == 1)
+        {
+            out.emplace_back(filtered.front());
+            return;
+        }
+
+        auto *filtered_collection = new ExtrusionEntityCollection();
+        filtered_collection->entities = std::move(filtered);
+        out.emplace_back(filtered_collection);
+        return;
+    }
+
+    if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity))
+    {
+        const bool needs_rewrite = std::any_of(loop->paths.begin(), loop->paths.end(),
+                                               [&](const ExtrusionPath &path)
+                                               { return should_replace_with_wave_path(path, desired_total_perimeters); });
+        if (!needs_rewrite)
+        {
+            out.emplace_back(entity);
+            return;
+        }
+
+        for (const ExtrusionPath &path : loop->paths)
+            subtract_wave_replaced_perimeters(path, clip_area, desired_total_perimeters, out);
+        delete loop;
+        return;
+    }
+
+    if (auto *multi_path = dynamic_cast<ExtrusionMultiPath *>(entity))
+    {
+        const bool needs_rewrite =
+            std::any_of(multi_path->paths.begin(), multi_path->paths.end(),
+                        [&](const ExtrusionPath &path)
+                        { return should_replace_with_wave_path(path, desired_total_perimeters); });
+        if (!needs_rewrite)
+        {
+            out.emplace_back(entity);
+            return;
+        }
+
+        for (const ExtrusionPath &path : multi_path->paths)
+            subtract_wave_replaced_perimeters(path, clip_area, desired_total_perimeters, out);
+        delete multi_path;
+        return;
+    }
+
+    if (auto *path = dynamic_cast<ExtrusionPath *>(entity))
+    {
+        subtract_wave_replaced_perimeters(*path, clip_area, desired_total_perimeters, out);
+        delete path;
+        return;
+    }
+
+    out.emplace_back(entity);
+}
+
+static void subtract_wave_replaced_perimeters(ExtrusionEntitiesPtr &entities, const ExPolygons &clip_area,
+                                              uint16_t desired_total_perimeters)
+{
+    ExtrusionEntitiesPtr filtered;
+    filtered.reserve(entities.size());
+    for (ExtrusionEntity *entity : entities)
+        subtract_wave_replaced_perimeters(entity, clip_area, desired_total_perimeters, filtered);
+    entities = std::move(filtered);
+}
+
 // Thanks, Cura developers, for implementing an algorithm for generating perimeters with variable width (Arachne) that is based on the paper
 // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling"
 void PerimeterGenerator::process_arachne(
@@ -1794,7 +1958,9 @@ void PerimeterGenerator::process_arachne(
     // Gaps without the thin walls
     ExtrusionEntityCollection & /* out_gap_fill */,
     // Infills without the gap fills
-    ExPolygons &out_fill_expolygons)
+    ExPolygons &out_fill_expolygons,
+    // Wave overhang support mask
+    Polygons &out_wave_overhang_filled_area)
 {
     // other perimeters
     coord_t perimeter_width = params.perimeter_flow.scaled_width();
@@ -1989,20 +2155,37 @@ void PerimeterGenerator::process_arachne(
     ExPolygons infill_areas = offset2_ex(union_ex(pp), float(-min_perimeter_infill_spacing / 2.),
                                          float(inset + min_perimeter_infill_spacing / 2.));
 
-    if (lower_slices != nullptr && params.config.overhangs && params.config.extra_perimeters_on_overhangs &&
+    if (lower_slices != nullptr && params.config.overhangs &&
+        (params.config.extra_perimeters_on_overhangs || params.config.wave_overhangs) &&
         params.config.perimeters > 0 && params.layer_id > params.object_config.raft_layers)
     {
-        // Generate extra perimeters on overhang areas, and cut them to these parts only, to save print time and material
-        auto [extra_perimeters, filled_area] = generate_extra_perimeters_over_overhangs(
-            infill_areas, lower_slices_polygons_cache, *lower_slices, loop_number + 1, params.overhang_flow,
-            params.scaled_resolution, params.object_config, params.print_config,
+        const int desired_wave_perimeters =
+            params.config.wave_overhangs ?
+                std::min(params.config.wave_overhang_outer_perimeters.value, loop_number + 1) :
+                loop_number + 1;
+        ExPolygons wave_infill_areas =
+            params.config.wave_overhangs ?
+                expand_wave_target_area(infill_areas, loop_number + 1, desired_wave_perimeters, perimeter_spacing) :
+                infill_areas;
+
+        // Generate extra perimeters / wave paths on overhang areas, and cut them to these parts only
+        auto [extra_perimeters, filled_area] = generate_overhang_toolpaths(
+            wave_infill_areas, lower_slices_polygons_cache, *lower_slices, loop_number + 1, desired_wave_perimeters,
+            params.overhang_flow, params.scaled_resolution, params.config, params.object_config, params.print_config,
+            params.config.wave_overhangs,
             params.layer != nullptr ? params.layer->print_z : 0.);
         if (!extra_perimeters.empty())
         {
+            if (params.config.wave_overhangs && !filled_area.empty())
+                append(out_wave_overhang_filled_area,
+                       support_mask_from_wave_filled_area(filled_area, surface, params, desired_wave_perimeters));
             ExtrusionEntityCollection &this_islands_perimeters = static_cast<ExtrusionEntityCollection &>(
                 *out_loops.entities.back());
             ExtrusionEntitiesPtr old_entities;
             old_entities.swap(this_islands_perimeters.entities);
+            if (params.config.wave_overhangs && desired_wave_perimeters < loop_number + 1)
+                subtract_wave_replaced_perimeters(old_entities, to_expolygons(filled_area),
+                                                  static_cast<uint16_t>(desired_wave_perimeters));
             for (ExtrusionPaths &paths : extra_perimeters)
                 this_islands_perimeters.append(std::move(paths));
             append(this_islands_perimeters.entities, old_entities);
@@ -2376,7 +2559,9 @@ void PerimeterGenerator::process_athena(
     // Gaps without the thin walls (not implemented for Athena - matches Arachne behavior)
     ExtrusionEntityCollection & /* out_gap_fill */,
     // Infills without the gap fills
-    ExPolygons &out_fill_expolygons)
+    ExPolygons &out_fill_expolygons,
+    // Wave overhang support mask
+    Polygons &out_wave_overhang_filled_area)
 {
     // Widths are fixed; spacing depends on effective perimeter count
     coord_t perimeter_width = params.perimeter_flow.scaled_width();
@@ -5126,20 +5311,36 @@ skip_interlocking:
         }
     }
 
-    if (lower_slices != nullptr && params.config.overhangs && params.config.extra_perimeters_on_overhangs &&
+    if (lower_slices != nullptr && params.config.overhangs &&
+        (params.config.extra_perimeters_on_overhangs || params.config.wave_overhangs) &&
         params.config.perimeters > 0 && params.layer_id > params.object_config.raft_layers)
     {
-        // Generate extra perimeters on overhang areas, and cut them to these parts only, to save print time and material
-        auto [extra_perimeters, filled_area] = generate_extra_perimeters_over_overhangs(
-            infill_areas, lower_slices_polygons_cache, *lower_slices, loop_number + 1, params.overhang_flow,
-            params.scaled_resolution, params.object_config, params.print_config,
+        const int desired_wave_perimeters =
+            params.config.wave_overhangs ?
+                std::min(params.config.wave_overhang_outer_perimeters.value, loop_number + 1) :
+                loop_number + 1;
+        ExPolygons wave_infill_areas =
+            params.config.wave_overhangs ?
+                expand_wave_target_area(infill_areas, loop_number + 1, desired_wave_perimeters, perimeter_spacing) :
+                infill_areas;
+
+        auto [extra_perimeters, filled_area] = generate_overhang_toolpaths(
+            wave_infill_areas, lower_slices_polygons_cache, *lower_slices, loop_number + 1, desired_wave_perimeters,
+            params.overhang_flow, params.scaled_resolution, params.config, params.object_config, params.print_config,
+            params.config.wave_overhangs,
             params.layer != nullptr ? params.layer->print_z : 0.);
         if (!extra_perimeters.empty())
         {
+            if (params.config.wave_overhangs && !filled_area.empty())
+                append(out_wave_overhang_filled_area,
+                       support_mask_from_wave_filled_area(filled_area, surface, params, desired_wave_perimeters));
             ExtrusionEntityCollection &this_islands_perimeters = static_cast<ExtrusionEntityCollection &>(
                 *out_loops.entities.back());
             ExtrusionEntitiesPtr old_entities;
             old_entities.swap(this_islands_perimeters.entities);
+            if (params.config.wave_overhangs && desired_wave_perimeters < loop_number + 1)
+                subtract_wave_replaced_perimeters(old_entities, to_expolygons(filled_area),
+                                                  static_cast<uint16_t>(desired_wave_perimeters));
             for (ExtrusionPaths &paths : extra_perimeters)
                 this_islands_perimeters.append(std::move(paths));
             append(this_islands_perimeters.entities, old_entities);

@@ -142,6 +142,7 @@ void LayerRegion::make_perimeters(
 {
     m_perimeters.clear();
     m_thin_fills.clear();
+    m_wave_overhang_filled_area.clear();
 
     perimeter_and_gapfill_ranges.reserve(perimeter_and_gapfill_ranges.size() + slices.size());
     // There may be more expolygons produced per slice, thus this reserve is conservative.
@@ -183,13 +184,13 @@ void LayerRegion::make_perimeters(
                 // input:
                 params, surface, lower_slices, upper_slices, lower_layer_polygons_cache,
                 // output:
-                m_perimeters, m_thin_fills, fill_expolygons);
+                m_perimeters, m_thin_fills, fill_expolygons, m_wave_overhang_filled_area);
         else
             PerimeterGenerator::process_athena(
                 // input:
                 params, surface, lower_slices, upper_slices, lower_layer_polygons_cache,
                 // output:
-                m_perimeters, m_thin_fills, fill_expolygons);
+                m_perimeters, m_thin_fills, fill_expolygons, m_wave_overhang_filled_area);
         perimeter_and_gapfill_ranges.emplace_back(ExtrusionRange{perimeters_begin, uint32_t(m_perimeters.size())},
                                                   ExtrusionRange{gap_fills_begin, uint32_t(m_thin_fills.size())});
         fill_expolygons_ranges.emplace_back(ExtrusionRange{fill_expolygons_begin, uint32_t(fill_expolygons.size())});
