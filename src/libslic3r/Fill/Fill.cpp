@@ -244,6 +244,8 @@ static const char *dbg_pattern(InfillPattern p)
         return "ZigZag";
     case ipCustom:
         return "Custom";
+    case ipCat:
+        return "Cat";
     default:
         return "UNKNOWN";
     }
@@ -2379,6 +2381,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipOctagramSpiral:
         case ipZigZag:
         case ipCustom:
+        case ipCat:
             break;
         }
 

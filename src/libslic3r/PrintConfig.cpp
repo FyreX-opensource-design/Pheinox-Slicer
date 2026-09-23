@@ -203,7 +203,8 @@ static const t_config_enum_values s_keys_map_InfillPattern{{"rectilinear", ipRec
                                                            {"supportcubic", ipSupportCubic},
                                                            {"lightning", ipLightning},
                                                            {"zigzag", ipZigZag},
-                                                           {"custom", ipCustom}};
+                                                           {"custom", ipCustom},
+                                                           {"cat", ipCat}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
 static const t_config_enum_values s_keys_map_IroningType{{"top", int(IroningType::TopSurfaces)},
@@ -2200,7 +2201,8 @@ void PrintConfigDef::init_fff_params()
         {"supportcubic", L("Support Cubic")},
         {"lightning", L("Lightning")},
         {"zigzag", L("Zig Zag")},
-        {"custom", L("Custom")}});
+        {"custom", L("Custom")},
+        {"cat", L("Cat")}});
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipStars));
 
     def = this->add("custom_infill_source", coEnum);

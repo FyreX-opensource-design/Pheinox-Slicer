@@ -254,6 +254,7 @@ enum InfillPattern : int
     ipEnsuring,
     ipZigZag,
     ipCustom,
+    ipCat,
     ipCount,
 };
 

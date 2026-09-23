@@ -123,6 +123,8 @@ set(SLIC3R_SOURCES
     Fill/FillGyroid.hpp
     Fill/FillCustom.cpp
     Fill/FillCustom.hpp
+    Fill/FillCat.cpp
+    Fill/FillCat.hpp
     Fill/FillPlanePath.cpp
     Fill/FillPlanePath.hpp
     Fill/FillLine.cpp
