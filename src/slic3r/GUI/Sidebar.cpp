@@ -6901,6 +6901,17 @@ wxPanel *FilamentSettingsPanel::BuildFilamentContent()
         sizer->Add(temp_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
+    // Per-tool flow/temperature smoothing (one filament preset per toolhead).
+    {
+        auto *flow_temp_group = CreateFlatStaticBoxSizer(content, _L("Flow temperature"));
+        CreateSettingRow(content, flow_temp_group, "flow_temp_enabled", _L("Flow temperature control"));
+        CreateSettingRow(content, flow_temp_group, "flow_temp_low", _L("Low temperature"));
+        CreateSettingRow(content, flow_temp_group, "flow_temp_high", _L("High temperature"));
+        CreateSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_heating", _L("Heating time per °C"));
+        CreateSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_cooling", _L("Cooling time per °C"));
+        sizer->Add(flow_temp_group, 0, wxEXPAND | wxALL, em / 4);
+    }
+
     content->SetSizer(sizer);
     ApplyDarkModeToPanel(content);
     return content;
@@ -9020,6 +9031,10 @@ void FilamentSettingsPanel::ApplyToggleLogic()
     // Pressure advance value depends on enable checkbox
     bool pa_enabled = config.opt_bool("filament_enable_pressure_advance", 0);
     ToggleOption("filament_pressure_advance", pa_enabled);
+
+    const bool flow_temp = config.opt_bool("flow_temp_enabled", 0);
+    for (const char *el : {"flow_temp_low", "flow_temp_high", "flow_temp_sec_per_c_heating", "flow_temp_sec_per_c_cooling"})
+        ToggleOption(el, flow_temp);
 }
 
 void FilamentSettingsPanel::msw_rescale()

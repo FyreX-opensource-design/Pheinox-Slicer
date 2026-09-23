@@ -315,6 +315,11 @@ class Settings:
     first_layer_speed_over_raft: str  # float or percentage
     first_layer_temperature: str  # semicolon-separated ints
     first_layer_travel_speed: str  # float or percentage
+    flow_temp_enabled: str  # semicolon-separated bools
+    flow_temp_high: str  # semicolon-separated ints
+    flow_temp_low: str  # semicolon-separated ints
+    flow_temp_sec_per_c_cooling: str  # semicolon-separated floats
+    flow_temp_sec_per_c_heating: str  # semicolon-separated floats
     full_fan_speed_layer: str  # semicolon-separated ints
     fuzzy_skin_first_layer: str  # bool (0/1)
     fuzzy_skin_octaves: str  # int

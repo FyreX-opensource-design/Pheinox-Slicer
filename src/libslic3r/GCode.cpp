@@ -29,6 +29,7 @@
 #include "libslic3r/GCode/ExtrusionProcessor.hpp"
 #include "I18N.hpp"
 #include "GCode.hpp"
+#include "GCode/FlowTemp.hpp"
 #include "GCode/GCodeObject.hpp"
 
 #ifdef _WIN32
@@ -662,6 +663,12 @@ static std::vector<std::pair<std::string, std::string>> validate_custom_gcode(co
 }
 } // namespace DoExport
 
+namespace DoExport
+{
+static void init_gcode_processor(const PrintConfig &config, GCodeProcessor &processor,
+                                 bool &silent_time_estimator_enabled, size_t preview_detail_threshold);
+}
+
 GCodeGenerator::GCodeGenerator(const Print *print)
     : m_origin(Vec2d::Zero())
     , m_enable_loop_clipping(true)
@@ -779,7 +786,28 @@ void GCodeGenerator::do_export(Print *print, const char *path, GCodeProcessorRes
     BOOST_LOG_TRIVIAL(debug) << "Start processing gcode, " << log_memory_info();
 
     if (GCodeObject *gco = file.release_gcode_object())
+    {
+        const std::string rewritten = apply_flow_temp(gco->text_buffer(), print->config());
+        if (!rewritten.empty())
+        {
+            delete gco;
+            gco = new GCodeObject();
+            gco->append_text(rewritten.c_str());
+            // The first pass already analyzed the unadjusted speeds. Parse the rewritten
+            // gcode so the preview and time estimate follow the clamped feedrates.
+            DoExport::init_gcode_processor(print->config(), m_processor, m_silent_time_estimator_enabled,
+                                           m_preview_detail_threshold);
+            m_processor.initialize(path != nullptr ? path : "");
+            m_processor.set_print(print);
+#ifdef SLIC3R_PYTHON_PREPROCESSOR
+            m_processor.set_preprocessing_consent(print->preprocessing_consent());
+            m_processor.set_preprocessing_category_order(print->preprocessing_category_order());
+            m_processor.set_project_dir(print->project_dir());
+#endif
+            m_processor.process_buffer(rewritten);
+        }
         m_processor.set_gcode_object(gco);
+    }
 
     gx_timer.stage("gcode: initialize_result_moves");
     // Post-process the G-code to update time stamps.
@@ -843,7 +871,7 @@ void GCodeGenerator::do_export(Print *print, const char *path, GCodeProcessorRes
 namespace DoExport
 {
 static void init_gcode_processor(const PrintConfig &config, GCodeProcessor &processor,
-                                 bool &silent_time_estimator_enabled, size_t preview_detail_threshold = 10'000'000)
+                                 bool &silent_time_estimator_enabled, size_t preview_detail_threshold)
 {
     silent_time_estimator_enabled = (config.gcode_flavor == gcfMarlinLegacy ||
                                      config.gcode_flavor == gcfMarlinFirmware) &&

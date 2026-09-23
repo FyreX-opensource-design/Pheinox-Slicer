@@ -5311,6 +5311,62 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(15));
 
+    def = this->add("flow_temp_enabled", coBools);
+    def->label = L("Flow temperature control");
+    def->tooltip = L(
+        "Vary this tool's nozzle temperature with upcoming volumetric flow, and slow extrusion when the nozzle is "
+        "still too cold for that flow. Each extruder is controlled on its own, so a toolchanger can preheat the next "
+        "hotend while another tool is printing. The high temperature is reached at this filament's max volumetric "
+        "flow. If that limit is zero, it is reached at the flow of the fastest 5% of extrusions in the print. "
+        "Adapted from the MZ Flow Temp processor.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBools{false});
+
+    def = this->add("flow_temp_low", coInts);
+    def->label = L("Flow temperature low");
+    def->tooltip = L(
+        "Nozzle temperature at zero flow. Temperature rises linearly to Flow temperature high at this filament's "
+        "max volumetric flow. The first layer stays at the first layer nozzle temperature.");
+    def->sidetext = L("°C");
+    def->min = 0;
+    def->max = max_temp;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("flow_temp_high", coInts);
+    def->label = L("Flow temperature high");
+    def->tooltip = L(
+        "Nozzle temperature at this filament's max volumetric flow. When that limit is zero, this is the temperature "
+        "of the fastest 5% of extrusions in the print. Must be above Flow temperature low or the control stays off "
+        "for this tool.");
+    def->sidetext = L("°C");
+    def->min = 0;
+    def->max = max_temp;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("flow_temp_sec_per_c_heating", coFloats);
+    def->label = L("Heating time per °C");
+    def->tooltip = L(
+        "Seconds this hotend needs to heat 1 °C. The lookahead window is long enough to cover a full swing from "
+        "the low temperature to the high one. Larger values delay and smooth the temperature change.");
+    def->sidetext = L("s/°C");
+    def->min = 0.1;
+    def->max = 120;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{6.});
+
+    def = this->add("flow_temp_sec_per_c_cooling", coFloats);
+    def->label = L("Cooling time per °C");
+    def->tooltip = L(
+        "Seconds this hotend needs to cool 1 °C. Used the same way as Heating time per °C when the target "
+        "temperature is falling.");
+    def->sidetext = L("s/°C");
+    def->min = 0.1;
+    def->max = 120;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{4.});
+
     def = this->add("temperature", coInts);
     def->label = L("Other layers");
     def->tooltip = L("Nozzle temperature for layers after the first one. Set this to zero to keep "

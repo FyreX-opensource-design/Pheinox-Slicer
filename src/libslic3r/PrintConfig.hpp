@@ -1265,6 +1265,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionFloatOrPercent, first_layer_extrusion_width))((ConfigOptionFloatOrPercent, first_layer_height))(
         (ConfigOptionFloatOrPercent, first_layer_speed))((ConfigOptionFloatOrPercent, first_layer_infill_speed))(
         (ConfigOptionFloatOrPercent, first_layer_travel_speed))((ConfigOptionInts, first_layer_temperature))(
+        (ConfigOptionBools, flow_temp_enabled))((ConfigOptionInts, flow_temp_low))((ConfigOptionInts, flow_temp_high))(
+        (ConfigOptionFloats, flow_temp_sec_per_c_heating))((ConfigOptionFloats, flow_temp_sec_per_c_cooling))(
         (ConfigOptionIntsNullable, idle_temperature))((ConfigOptionInts, full_fan_speed_layer))(
         (ConfigOptionFloat, infill_acceleration))((ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))(
         (ConfigOptionFloats, max_layer_height))((ConfigOptionInts, min_fan_speed))(

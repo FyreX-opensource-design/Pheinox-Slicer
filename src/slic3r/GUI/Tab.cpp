@@ -3308,10 +3308,16 @@ void TabFilament::build()
 
     create_line_with_near_label_widget(optgroup, "idle_temperature");
 
-    Line line = {L("Nozzle"), ""};
+    Line     line = {L("Nozzle"), ""};
     line.append_option(optgroup->get_option("first_layer_temperature"));
     line.append_option(optgroup->get_option("temperature"));
     optgroup->append_line(line);
+
+    optgroup->append_single_option_line("flow_temp_enabled");
+    optgroup->append_single_option_line("flow_temp_low");
+    optgroup->append_single_option_line("flow_temp_high");
+    optgroup->append_single_option_line("flow_temp_sec_per_c_heating");
+    optgroup->append_single_option_line("flow_temp_sec_per_c_cooling");
 
     line = {L("Bed"), ""};
     line.append_option(optgroup->get_option("first_layer_bed_temperature"));
