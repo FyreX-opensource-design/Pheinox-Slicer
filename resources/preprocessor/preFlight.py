@@ -223,6 +223,8 @@ class Settings:
     custom_infill_file: str
     custom_infill_threshold: str  # float
     custom_infill_tile_size: str  # float
+    custom_infill_value_max: str  # float
+    custom_infill_value_min: str  # float
     custom_parameters_filament: str  # semicolon-separated
     custom_parameters_print: str
     custom_parameters_printer: str

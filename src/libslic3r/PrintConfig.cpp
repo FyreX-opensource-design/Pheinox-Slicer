@@ -2192,11 +2192,13 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Custom infill equations");
     def->category = L("Infill");
     def->tooltip = L(
-        "One expression per line. Each expression is an implicit surface f(x,y) or f(x,y,z) whose iso-contour "
-        "f = threshold is extruded. Coordinates are in millimeters relative to the object origin. "
-        "Supported: + - * / ^, parentheses, sin cos tan abs sqrt min max floor ceil, pi, and variables x y z. "
-        "Example: sin(x) + sin(y)\n"
-        "Example (3D): sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)");
+        "One expression per line. Infill is drawn where the expression equals the graph minimum and where it "
+        "equals the graph maximum. x, y, and z repeat every tile: inside each tile they run from -π to π, with the "
+        "origin at the tile center. Supported: + - * / ^, parentheses, sin cos tan abs sqrt min max floor ceil, pi, "
+        "and variables x y z. Expressions that only touch a chosen value, such as (x+y+z)^2 at 0, are drawn along "
+        "that contact. Example: sin(x) + sin(y)\n"
+        "Example (3D): sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)\n"
+        "Example: cos(x)^2+cos(y)^2 ranges from 0 to 2 and only touches 0 at points, so set both graph values to 1.");
     def->multiline = true;
     def->full_width = true;
     def->height = 8;
@@ -2216,8 +2218,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Custom infill tile size");
     def->category = L("Infill");
     def->tooltip = L(
-        "Period of the custom pattern in millimeters. For equations this scales x/y/z (period ≈ 2π·tile/2π = tile "
-        "when using sin/cos of x). For images and meshes this is the XY tile width (height follows aspect ratio).");
+        "Period of the custom pattern in millimeters. For equations, x/y/z repeat on this period "
+        "(one tile spans -π to π). For images and meshes this is the XY tile width (height follows aspect ratio).");
     def->sidetext = L("mm");
     def->min = 0.1;
     def->mode = comAdvanced;
@@ -2227,10 +2229,28 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Custom infill threshold");
     def->category = L("Infill");
     def->tooltip = L(
-        "Iso-level for equation contours (f = threshold), or grayscale cutoff for PNG (0 = black, 1 = white). "
-        "Ignored for SVG stroke paths and mesh slices.");
+        "Grayscale cutoff for a PNG custom infill (0 = black, 1 = white). Ignored for SVG stroke paths and mesh slices. "
+        "Graph equations use Graph minimum and Graph maximum instead.");
     def->min = -10.;
     def->max = 10.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("custom_infill_value_min", coFloat);
+    def->label = L("Graph minimum");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "Smallest expression value to draw. A contour is traced where the expression equals this value. "
+        "Set this equal to Graph maximum for a single contour. The default of 0 keeps sin(x)+sin(y).");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("custom_infill_value_max", coFloat);
+    def->label = L("Graph maximum");
+    def->category = L("Infill");
+    def->tooltip = L(
+        "Largest expression value to draw. A second contour is traced here when it differs from Graph minimum. "
+        "cos(x)^2+cos(y)^2 ranges from 0 to 2 and only touches 0 at points; set both graph values to 1 to draw that level.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 

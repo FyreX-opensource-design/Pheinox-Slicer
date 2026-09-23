@@ -1131,7 +1131,11 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
         else if (opt_key == "top_fill_pattern" || opt_key == "bottom_fill_pattern" ||
                  opt_key == "external_fill_link_max_length" || opt_key == "fill_angle" || opt_key == "infill_anchor" ||
                  opt_key == "infill_anchor_max" || opt_key == "top_infill_extrusion_width" ||
-                 opt_key == "first_layer_extrusion_width")
+                 opt_key == "first_layer_extrusion_width" || opt_key == "custom_infill_source" ||
+                 opt_key == "custom_infill_equations" || opt_key == "custom_infill_file" ||
+                 opt_key == "custom_infill_tile_size" || opt_key == "custom_infill_threshold" ||
+                 opt_key == "custom_infill_value_min" || opt_key == "custom_infill_value_max" ||
+                 opt_key == "custom_infill_angle")
         {
             steps.emplace_back(posInfill);
         }

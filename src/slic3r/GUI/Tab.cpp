@@ -2093,6 +2093,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("fill_pattern", category_path + "fill-pattern");
     optgroup->append_single_option_line("custom_infill_source", category_path + "custom-infill-source");
     optgroup->append_single_option_line("custom_infill_equations", category_path + "custom-infill-equations");
+    optgroup->append_single_option_line("custom_infill_value_min", category_path + "custom-infill-value-min");
+    optgroup->append_single_option_line("custom_infill_value_max", category_path + "custom-infill-value-max");
     optgroup->append_single_option_line("custom_infill_file", category_path + "custom-infill-file");
     optgroup->append_single_option_line("custom_infill_tile_size", category_path + "custom-infill-tile-size");
     optgroup->append_single_option_line("custom_infill_threshold", category_path + "custom-infill-threshold");

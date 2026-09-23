@@ -413,8 +413,133 @@ static std::vector<std::string> split_equations(const std::string &text)
     return out;
 }
 
+// One tile maps onto [-π, π), with the expression origin at the tile center.
+// Repeats in x, y, and z, so a polynomial such as (x+y+z)^2 crosses every tile
+// instead of once in the whole bed.
+static double tile_phase(double mm, double tile_mm)
+{
+    double u = std::fmod(mm, tile_mm);
+    if (u < 0.)
+        u += tile_mm;
+    return (u / tile_mm - 0.5) * (2. * M_PI);
+}
+
+// Marching squares only emits a segment where samples change sign. Expressions such as
+// (x+y+z)^2 stay non-negative and only touch the threshold, so also trace those contacts.
+static Lines valley_touch_lines(const SampleGrid &grid, const Expr &expr, double tile_mm, double z_mm, double threshold)
+{
+    const double phase_z = tile_phase(z_mm, tile_mm);
+    Lines out;
+    struct Hit
+    {
+        double x;
+        double y;
+    };
+
+    for (int r = 0; r < grid.rows - 1; ++r) {
+        for (int c = 0; c < grid.cols - 1; ++c) {
+            const float v00 = grid.at(c, r);
+            const float v10 = grid.at(c + 1, r);
+            const float v11 = grid.at(c + 1, r + 1);
+            const float v01 = grid.at(c, r + 1);
+            const int n_neg = (v00 < 0.f) + (v10 < 0.f) + (v11 < 0.f) + (v01 < 0.f);
+            // A sign change is already a marching-squares segment.
+            if (n_neg != 0 && n_neg != 4)
+                continue;
+
+            const float amin = std::min({std::abs(v00), std::abs(v10), std::abs(v11), std::abs(v01)});
+            const float amax = std::max({std::abs(v00), std::abs(v10), std::abs(v11), std::abs(v01)});
+            const double x0 = grid.origin_x + c * grid.step;
+            const double y0 = grid.origin_y + r * grid.step;
+            const double x1 = x0 + grid.step;
+            const double y1 = y0 + grid.step;
+
+            auto eval_at = [&](double x, double y) -> float {
+                const double v = expr.eval(tile_phase(x, tile_mm), tile_phase(y, tile_mm), phase_z);
+                return std::isfinite(v) ? float(v - threshold) : std::numeric_limits<float>::quiet_NaN();
+            };
+
+            // Flat cells get one center sample. Only keep going when that sample falls into a valley.
+            if (amax <= amin * 4.f + 1e-6f) {
+                const float vc = eval_at(0.5 * (x0 + x1), 0.5 * (y0 + y1));
+                if (! std::isfinite(vc) || std::abs(vc) > amin * 0.5f + 1e-6f)
+                    continue;
+            }
+
+            Hit hits[8];
+            int nh = 0;
+            auto consider_edge = [&](double ax, double ay, float va, double bx, double by, float vb) {
+                const float vm = eval_at(0.5 * (ax + bx), 0.5 * (ay + by));
+                if (! std::isfinite(vm) || ! std::isfinite(va) || ! std::isfinite(vb))
+                    return;
+                auto push = [&](double t) {
+                    if (t < -1. || t > 1. || nh >= 8)
+                        return;
+                    hits[nh++] = Hit{0.5 * (ax + bx) + t * (bx - ax) * 0.5, 0.5 * (ay + by) + t * (by - ay) * 0.5};
+                };
+                auto lerp_zero = [&](double t0, float f0, double t1, float f1) {
+                    if ((f0 >= 0.f) == (f1 >= 0.f))
+                        return;
+                    const double denom = double(f1) - double(f0);
+                    if (std::abs(denom) < 1e-12)
+                        return;
+                    push(t0 + (0. - double(f0)) / denom * (t1 - t0));
+                };
+                // Midpoint landed on the other side of the threshold: the crossing sits between samples.
+                lerp_zero(-1., va, 0., vm);
+                lerp_zero(0., vm, 1., vb);
+                // Same side on the whole edge. A parabola that still reaches the threshold is a touch
+                // (the squared-sum case never changes sign).
+                if ((va >= 0.f) == (vm >= 0.f) && (vm >= 0.f) == (vb >= 0.f)) {
+                    const double A = 0.5 * (double(va) + double(vb)) - double(vm);
+                    const double B = 0.5 * (double(vb) - double(va));
+                    if (std::abs(A) <= 1e-12)
+                        return;
+                    const double t = -B / (2. * A);
+                    if (t < -1. || t > 1.)
+                        return;
+                    const double fv = double(vm) + t * B + t * t * A;
+                    const double tol = 1e-3 * std::max(1.0, std::abs(double(va)) + std::abs(double(vb)));
+                    const bool from_above = A > 0. && va >= 0.f && fv <= tol;
+                    const bool from_below = A < 0. && va <= 0.f && fv >= -tol;
+                    if (from_above || from_below)
+                        push(t);
+                }
+            };
+
+            consider_edge(x0, y0, v00, x1, y0, v10);
+            consider_edge(x1, y0, v10, x1, y1, v11);
+            consider_edge(x0, y1, v01, x1, y1, v11);
+            consider_edge(x0, y0, v00, x0, y1, v01);
+            if (nh < 2)
+                continue;
+
+            int ia = 0;
+            int ib = 1;
+            double best = -1.;
+            for (int i = 0; i < nh; ++i) {
+                for (int j = i + 1; j < nh; ++j) {
+                    const double dx = hits[i].x - hits[j].x;
+                    const double dy = hits[i].y - hits[j].y;
+                    const double d2 = dx * dx + dy * dy;
+                    if (d2 > best) {
+                        best = d2;
+                        ia = i;
+                        ib = j;
+                    }
+                }
+            }
+            if (best <= 1e-12)
+                continue;
+            out.emplace_back(Point::new_scale(hits[ia].x, hits[ia].y), Point::new_scale(hits[ib].x, hits[ib].y));
+        }
+    }
+    return out;
+}
+
 static Polylines generate_equation_infill(const ExPolygon &expoly, const std::vector<Expr> &exprs, double z_mm,
-                                          double tile_mm, float threshold, double spacing_mm, double angle_rad)
+                                          double tile_mm, float level_min, float level_max, double spacing_mm,
+                                          double angle_rad)
 {
     BoundingBox bb = get_extents(expoly);
     bb.offset(scale_(spacing_mm));
@@ -425,54 +550,40 @@ static Polylines generate_equation_infill(const ExPolygon &expoly, const std::ve
 
     // Sample denser than extrusion spacing for smooth contours.
     const double step = std::clamp(std::min(spacing_mm, tile_mm) * 0.35, 0.15, 1.0);
-    const double scale_xy = (tile_mm > EPSILON) ? (2. * M_PI / tile_mm) : 1.;
 
-    SampleGrid grid;
-    grid.step = step;
-    grid.origin_x = min_x;
-    grid.origin_y = min_y;
-    grid.cols = std::max(2, int(std::ceil((max_x - min_x) / step)) + 1);
-    grid.rows = std::max(2, int(std::ceil((max_y - min_y) / step)) + 1);
-    grid.values.assign(size_t(grid.cols) * size_t(grid.rows), 0.f);
+    const int cols = std::max(2, int(std::ceil((max_x - min_x) / step)) + 1);
+    const int rows = std::max(2, int(std::ceil((max_y - min_y) / step)) + 1);
+    if (level_max < level_min)
+        std::swap(level_min, level_max);
+    const float levels[2] = {level_min, level_max};
+    const int n_levels = (double(level_max) - double(level_min) > 1e-4) ? 2 : 1;
 
-    // Combine equations with a soft-min so multiple surfaces contribute.
-    for (int r = 0; r < grid.rows; ++r) {
-        for (int c = 0; c < grid.cols; ++c) {
-            const double x = min_x + c * step;
-            const double y = min_y + r * step;
-            const double sx = x * scale_xy;
-            const double sy = y * scale_xy;
-            const double sz = z_mm * scale_xy;
-            double best = std::numeric_limits<double>::infinity();
-            for (const Expr &e : exprs) {
-                const double v = e.eval(sx, sy, sz);
-                if (std::isfinite(v))
-                    best = std::min(best, std::abs(v - threshold));
-            }
-            // Convert distance-to-iso into a signed field around 0 for marching squares.
-            // Using -distance so the zero contour tracks the iso-level.
-            grid.values[size_t(r) * size_t(grid.cols) + size_t(c)] =
-                best < std::numeric_limits<double>::infinity() ? float(-best) : 0.f;
-        }
-    }
-
-    // Zero contour of -|f-threshold| is exactly the iso-contour. Sample a thin band with a high isolevel
-    // close to 0 from below would be empty; use isolevel just below 0 and keep all segments near zero.
-    // Better approach: evaluate signed (f - threshold) and take isolevel 0 for each equation separately.
     Polylines all;
     for (const Expr &e : exprs) {
-        SampleGrid g = grid;
-        for (int r = 0; r < g.rows; ++r) {
-            for (int c = 0; c < g.cols; ++c) {
+        std::vector<float> raw(size_t(cols) * size_t(rows));
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
                 const double x = min_x + c * step;
                 const double y = min_y + r * step;
-                const double v = e.eval(x * scale_xy, y * scale_xy, z_mm * scale_xy);
-                g.values[size_t(r) * size_t(g.cols) + size_t(c)] = float(std::isfinite(v) ? (v - threshold) : 0.);
+                const double v = e.eval(tile_phase(x, tile_mm), tile_phase(y, tile_mm), tile_phase(z_mm, tile_mm));
+                raw[size_t(r) * size_t(cols) + size_t(c)] = std::isfinite(v) ? float(v) : 0.f;
             }
         }
-        Lines segs = marching_squares_mm(g, 0.f);
-        Polylines pls = lines_to_polylines(std::move(segs));
-        append(all, std::move(pls));
+        for (int li = 0; li < n_levels; ++li) {
+            SampleGrid g;
+            g.step = step;
+            g.origin_x = min_x;
+            g.origin_y = min_y;
+            g.cols = cols;
+            g.rows = rows;
+            g.values.resize(raw.size());
+            for (size_t i = 0; i < raw.size(); ++i)
+                g.values[i] = raw[i] - levels[li];
+            Lines segs = marching_squares_mm(g, 0.f);
+            append(segs, valley_touch_lines(g, e, tile_mm, z_mm, levels[li]));
+            Polylines pls = lines_to_polylines(std::move(segs));
+            append(all, std::move(pls));
+        }
     }
 
     const Point center = bb.center();
@@ -731,6 +842,8 @@ void FillCustom::_fill_surface_single(const FillParams &params, unsigned int /*t
     const CustomInfillSource source = print_region_config->custom_infill_source.value;
     const double tile_mm = std::max(0.1, print_region_config->custom_infill_tile_size.value);
     const float threshold = float(print_region_config->custom_infill_threshold.value);
+    const float level_min = float(print_region_config->custom_infill_value_min.value);
+    const float level_max = float(print_region_config->custom_infill_value_max.value);
     const double angle_rad = Geometry::deg2rad(print_region_config->custom_infill_angle.value);
     const double spacing_mm = std::max(0.1, this->spacing / std::max(0.05, double(params.density)));
 
@@ -747,7 +860,8 @@ void FillCustom::_fill_surface_single(const FillParams &params, unsigned int /*t
         }
         if (exprs.empty())
             return;
-        generated = generate_equation_infill(expolygon, exprs, this->z, tile_mm, threshold, spacing_mm, angle_rad);
+        generated = generate_equation_infill(expolygon, exprs, this->z, tile_mm, level_min, level_max, spacing_mm,
+                                            angle_rad);
         break;
     }
     case CustomInfillSource::Image: {

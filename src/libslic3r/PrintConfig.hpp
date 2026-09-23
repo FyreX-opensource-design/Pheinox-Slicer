@@ -1063,6 +1063,7 @@ PRINT_CONFIG_CLASS_DEFINE(
                                                               custom_infill_source))(
         (ConfigOptionString, custom_infill_equations))((ConfigOptionString, custom_infill_file))(
         (ConfigOptionFloat, custom_infill_tile_size))((ConfigOptionFloat, custom_infill_threshold))(
+        (ConfigOptionFloat, custom_infill_value_min))((ConfigOptionFloat, custom_infill_value_max))(
         (ConfigOptionFloat, custom_infill_angle))((ConfigOptionEnum<FuzzySkinType>, fuzzy_skin))(
         (ConfigOptionFloat, fuzzy_skin_thickness))((ConfigOptionFloat, fuzzy_skin_point_dist))(
         (ConfigOptionBool, fuzzy_skin_first_layer))((ConfigOptionEnum<FuzzySkinNoiseType>, fuzzy_skin_noise_type))(

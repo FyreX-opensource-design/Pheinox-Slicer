@@ -833,10 +833,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     const CustomInfillSource custom_src =
         config->option<ConfigOptionEnum<CustomInfillSource>>("custom_infill_source")->value;
     toggle_field("custom_infill_equations", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    toggle_field("custom_infill_value_min", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    toggle_field("custom_infill_value_max", have_custom_infill && custom_src == CustomInfillSource::Equation);
     toggle_field("custom_infill_file",
                  have_custom_infill &&
                      (custom_src == CustomInfillSource::Image || custom_src == CustomInfillSource::Mesh));
-    for (auto el : {"custom_infill_tile_size", "custom_infill_threshold", "custom_infill_angle"})
+    toggle_field("custom_infill_threshold", have_custom_infill && custom_src == CustomInfillSource::Image);
+    for (auto el : {"custom_infill_tile_size", "custom_infill_angle"})
         toggle_field(el, have_custom_infill);
 
     toggle_field("infill_every_layers", have_infill && !has_automatic_infill_combination);

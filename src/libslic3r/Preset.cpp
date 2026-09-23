@@ -586,6 +586,8 @@ static std::vector<std::string> s_Preset_print_options{
     "custom_infill_file",
     "custom_infill_tile_size",
     "custom_infill_threshold",
+    "custom_infill_value_min",
+    "custom_infill_value_max",
     "custom_infill_angle",
     "top_fill_pattern",
     "bottom_fill_pattern",

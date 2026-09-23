@@ -1869,6 +1869,8 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
         CreateSettingRow(content, infill_group, "fill_pattern", _L("Fill pattern"));
         CreateSettingRow(content, infill_group, "custom_infill_source", _L("Custom infill source"));
         CreateSettingRow(content, infill_group, "custom_infill_equations", _L("Custom infill equations"));
+        CreateSettingRow(content, infill_group, "custom_infill_value_min", _L("Graph minimum"));
+        CreateSettingRow(content, infill_group, "custom_infill_value_max", _L("Graph maximum"));
         CreateSettingRow(content, infill_group, "custom_infill_file", _L("Custom infill file"));
         CreateSettingRow(content, infill_group, "custom_infill_tile_size", _L("Custom infill tile size"));
         CreateSettingRow(content, infill_group, "custom_infill_threshold", _L("Custom infill threshold"));
@@ -3137,10 +3139,13 @@ void PrintSettingsPanel::ApplyToggleLogic()
     const CustomInfillSource custom_src =
         config.option<ConfigOptionEnum<CustomInfillSource>>("custom_infill_source")->value;
     ToggleOption("custom_infill_equations", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    ToggleOption("custom_infill_value_min", have_custom_infill && custom_src == CustomInfillSource::Equation);
+    ToggleOption("custom_infill_value_max", have_custom_infill && custom_src == CustomInfillSource::Equation);
     ToggleOption("custom_infill_file",
                  have_custom_infill &&
                      (custom_src == CustomInfillSource::Image || custom_src == CustomInfillSource::Mesh));
-    for (const char *el : {"custom_infill_tile_size", "custom_infill_threshold", "custom_infill_angle"})
+    ToggleOption("custom_infill_threshold", have_custom_infill && custom_src == CustomInfillSource::Image);
+    for (const char *el : {"custom_infill_tile_size", "custom_infill_angle"})
         ToggleOption(el, have_custom_infill);
 
     ToggleOption("infill_every_layers", have_infill && !has_automatic_infill_combination);
