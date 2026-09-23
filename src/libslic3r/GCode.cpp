@@ -51,6 +51,8 @@
 #include "ShortestPath.hpp"
 #include "TravelOptimization.hpp"
 #include "Print.hpp"
+#include "AABBMesh.hpp"
+#include "Model.hpp"
 #include "Thread.hpp"
 #include "Utils.hpp"
 #include "ClipperUtils.hpp"
@@ -669,6 +671,21 @@ static void init_gcode_processor(const PrintConfig &config, GCodeProcessor &proc
                                  bool &silent_time_estimator_enabled, size_t preview_detail_threshold);
 }
 
+struct GCodeGenerator::ZaaMesh
+{
+    const PrintObject *object;
+    // AABBMesh stores a pointer to the triangle set, so this copy has to outlive the mesh.
+    indexed_triangle_set its;
+    AABBMesh mesh;
+
+    ZaaMesh(const PrintObject *object, indexed_triangle_set &&src)
+        : object(object), its(std::move(src)), mesh(this->its)
+    {
+    }
+};
+
+GCodeGenerator::~GCodeGenerator() = default;
+
 GCodeGenerator::GCodeGenerator(const Print *print)
     : m_origin(Vec2d::Zero())
     , m_enable_loop_clipping(true)
@@ -686,6 +703,164 @@ GCodeGenerator::GCodeGenerator(const Print *print)
     , m_silent_time_estimator_enabled(false)
     , m_print(print)
 {
+}
+
+const AABBMesh *GCodeGenerator::zaa_mesh()
+{
+    if (m_layer == nullptr || m_layer->object() == nullptr)
+        return nullptr;
+    const PrintObject *object = m_layer->object();
+    if (m_zaa_mesh && m_zaa_mesh->object == object)
+        return &m_zaa_mesh->mesh;
+
+    indexed_triangle_set combined;
+    const Transform3d trafo = object->trafo_centered();
+    for (const ModelVolume *volume : object->model_object()->volumes)
+    {
+        if (volume == nullptr || !volume->is_model_part())
+            continue;
+        indexed_triangle_set part = volume->mesh().its;
+        if (part.indices.empty())
+            continue;
+        its_transform(part, (trafo * volume->get_matrix()).cast<float>(), true);
+        its_merge(combined, std::move(part));
+    }
+    if (combined.indices.empty())
+    {
+        m_zaa_mesh.reset();
+        return nullptr;
+    }
+    m_zaa_mesh = std::make_unique<ZaaMesh>(object, std::move(combined));
+    return &m_zaa_mesh->mesh;
+}
+
+void GCodeGenerator::contour_top_surface(GCode::SmoothPath &path)
+{
+    if (!m_config.zaa_enabled.value || m_layer == nullptr || m_layer->id() == 0 || path.empty())
+        return;
+    const double layer_h = m_layer->height;
+    if (layer_h < 0.05)
+        return;
+    const double min_h = std::clamp(double(m_config.zaa_min_height.value), 0.02, layer_h * 0.95);
+    const AABBMesh *mesh = this->zaa_mesh();
+    if (mesh == nullptr)
+        return;
+
+    const double print_z = m_layer->print_z;
+    const double origin_z = print_z - layer_h - 0.02;
+    const double spacing = scale_(0.2);
+    const bool thin_outer_walls = m_config.outer_wall_layer_height.value > 0.;
+
+    for (GCode::SmoothPathElement &el : path)
+    {
+        if (el.path.size() < 2)
+            continue;
+        const ExtrusionRole role = el.path_attributes.role;
+        const bool ironing = role == ExtrusionRole::Ironing;
+        const bool top = role == ExtrusionRole::TopSolidInfill;
+        const bool perimeter = role.is_perimeter() && !role.is_bridge() && !role.is_serpentine();
+        if (!ironing && !top && !perimeter)
+            continue;
+        // The outer-wall stepper already places these beads. Contouring them again
+        // would pull the stepped wall off the heights it just chose.
+        if (perimeter && role.is_external_perimeter() && thin_outer_walls)
+            continue;
+        bool already_stepped = false;
+        for (const Geometry::ArcWelder::Segment &seg : el.path)
+        {
+            if (std::abs(seg.height_fraction - 1.f) > 1e-4f)
+            {
+                already_stepped = true;
+                break;
+            }
+        }
+        if (already_stepped)
+            continue;
+
+        const double max_up = ironing ? layer_h : min_h;
+        const double min_down = ironing ? -(layer_h + 0.1) : -(layer_h - min_h);
+        const float bead = el.path_attributes.height > 1e-4f ? el.path_attributes.height : float(layer_h);
+
+        std::vector<Vec2d> samples;
+        samples.push_back(el.path.front().point.cast<double>());
+        for (size_t i = 1; i < el.path.size(); ++i)
+        {
+            const Geometry::ArcWelder::Segment &prev = el.path[i - 1];
+            const Geometry::ArcWelder::Segment &seg = el.path[i];
+            const Vec2d a = prev.point.cast<double>();
+            const Vec2d b = seg.point.cast<double>();
+            if (std::abs(seg.radius) > 1e-6)
+            {
+                const double radius = double(seg.radius);
+                const Vec2d center = Geometry::ArcWelder::arc_center(a, b, radius, seg.ccw());
+                const double arc_len = Geometry::ArcWelder::arc_length(a, b, center, seg.ccw());
+                if (std::isfinite(arc_len) && arc_len > spacing)
+                {
+                    const int n = std::max(1, static_cast<int>(std::ceil(arc_len / spacing)));
+                    for (int k = 1; k <= n; ++k)
+                        samples.push_back(Geometry::ArcWelder::arc_point_at_distance(a, b, center, seg.ccw(),
+                                                                                     arc_len * k / double(n)));
+                    continue;
+                }
+            }
+            const double len = (b - a).norm();
+            const int n = std::max(1, static_cast<int>(std::ceil(len / std::max(1., spacing))));
+            for (int k = 1; k <= n; ++k)
+                samples.push_back(a + (b - a) * (double(k) / double(n)));
+        }
+        if (samples.size() < 2)
+            continue;
+
+        struct Contoured
+        {
+            Vec2d xy;
+            double d;
+            double factor;
+        };
+        std::vector<Contoured> contoured;
+        contoured.reserve(samples.size());
+        bool any = false;
+        for (const Vec2d &sample : samples)
+        {
+            const double x = unscaled<double>(sample.x());
+            const double y = unscaled<double>(sample.y());
+            const AABBMesh::hit_result hit = mesh->query_ray_hit(Vec3d(x, y, origin_z), Vec3d(0., 0., 1.));
+            double d = 0.;
+            if (hit.is_hit())
+                d = origin_z + hit.distance() - print_z;
+            if (d < min_down - 0.03 || d > max_up + 0.03)
+                d = 0.;
+            else
+                d = std::clamp(d, min_down, max_up);
+            if (perimeter && d > 0.)
+                d = 0.;
+            if (std::abs(d) > 1e-4)
+                any = true;
+            const double local = std::clamp(layer_h + d, min_h, layer_h + std::max(0., max_up));
+            contoured.push_back({sample, d, ironing ? 1. : local / layer_h});
+        }
+        if (!any)
+            continue;
+
+        Geometry::ArcWelder::Segment templ = el.path.front();
+        templ.radius = 0.f;
+        Geometry::ArcWelder::Path dense;
+        dense.reserve(contoured.size());
+        for (size_t i = 0; i < contoured.size(); ++i)
+        {
+            const Point rounded{coord_t(std::lround(contoured[i].xy.x())), coord_t(std::lround(contoured[i].xy.y()))};
+            if (!dense.empty() && dense.back().point == rounded)
+                continue;
+            templ.point = rounded;
+            templ.height_fraction = float(1. + contoured[i].d / double(bead));
+            templ.e_fraction = 1.f;
+            if (i > 0 && !ironing)
+                templ.e_fraction = float(0.5 * (contoured[i - 1].factor + contoured[i].factor));
+            dense.push_back(templ);
+        }
+        if (dense.size() >= 2)
+            el.path = std::move(dense);
+    }
 }
 
 void GCodeGenerator::do_export(Print *print, const char *path, GCodeProcessorResult *result,
@@ -3862,12 +4037,16 @@ std::string GCodeGenerator::extrude_smooth_path(const GCode::SmoothPath &smooth_
                                                 const std::string_view description, const double speed,
                                                 const std::size_t wipe_offset)
 {
+    GCode::SmoothPath contoured_path = smooth_path;
+    this->contour_top_surface(contoured_path);
+    const GCode::SmoothPath &path_to_emit = contoured_path;
+
     std::string gcode;
 
     // Extrude along the smooth path.
     bool is_bridge_extruded = false;
     EmitModifiers emit_modifiers = EmitModifiers::create_with_disabled_emits();
-    for (auto el_it = smooth_path.begin(); el_it != smooth_path.end(); ++el_it)
+    for (auto el_it = path_to_emit.begin(); el_it != path_to_emit.end(); ++el_it)
     {
         const auto next_el_it = next(el_it);
 
@@ -3879,7 +4058,7 @@ std::string GCodeGenerator::extrude_smooth_path(const GCode::SmoothPath &smooth_
         if (el_it->path_attributes.role.is_bridge())
         {
             emit_modifiers.emit_bridge_fan_start = !is_bridge_extruded;
-            emit_modifiers.emit_bridge_fan_end = next_el_it == smooth_path.end() ||
+            emit_modifiers.emit_bridge_fan_end = next_el_it == path_to_emit.end() ||
                                                  !next_el_it->path_attributes.role.is_bridge();
             is_bridge_extruded = true;
         }
@@ -3892,7 +4071,7 @@ std::string GCodeGenerator::extrude_smooth_path(const GCode::SmoothPath &smooth_
 
         // Ensure that just for the last extrusion from the smooth path, the fan speed will be reset back
         // to the value calculated by the CoolingBuffer.
-        if (next_el_it == smooth_path.end())
+        if (next_el_it == path_to_emit.end())
         {
             emit_modifiers.emit_fan_speed_reset = true;
         }
@@ -3905,7 +4084,7 @@ std::string GCodeGenerator::extrude_smooth_path(const GCode::SmoothPath &smooth_
 
     if (is_loop)
     {
-        GCode::SmoothPath wipe{smooth_path.begin() + wipe_offset, smooth_path.end()};
+        GCode::SmoothPath wipe{path_to_emit.begin() + wipe_offset, path_to_emit.end()};
         m_wipe.set_path(std::move(wipe));
     }
     else
@@ -3915,7 +4094,7 @@ std::string GCodeGenerator::extrude_smooth_path(const GCode::SmoothPath &smooth_
             throw std::runtime_error("Wipe offset is not supported for non looped paths!");
         }
 
-        GCode::SmoothPath reversed_smooth_path{smooth_path};
+        GCode::SmoothPath reversed_smooth_path{path_to_emit};
         GCode::reverse(reversed_smooth_path);
         m_wipe.set_path(std::move(reversed_smooth_path));
     }
@@ -5811,6 +5990,11 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
             [this]() { return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer); })};
         gcode += travel_gcode;
     }
+    else if (std::abs(path.front().height_fraction - 1.f) > 1e-4f)
+    {
+        const double z = this->m_last_layer_z + (path.front().height_fraction - 1.0) * path_attr.height;
+        gcode += this->m_writer.travel_to_z(z, "contour z");
+    }
 
     if (use_wave_travel)
         m_writer.set_travel_speed_override(0.);
@@ -6895,7 +7079,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                         }
 
                         double extrusion_amount{segment_e_per_mm * line_length * it->e_fraction};
-                        if (it->height_fraction < 1.0 || std::prev(it)->height_fraction < 1.0)
+                        if (std::abs(it->height_fraction - 1.f) > 1e-4f ||
+                            std::abs(std::prev(it)->height_fraction - 1.f) > 1e-4f)
                         {
                             const Vec3d destination{
                                 to_3d(p, this->m_last_layer_z + (it->height_fraction - 1) * m_last_height)};

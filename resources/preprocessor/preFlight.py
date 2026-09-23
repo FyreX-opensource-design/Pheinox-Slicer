@@ -629,6 +629,8 @@ class Settings:
     wiping_volumes_use_custom_matrix: str  # bool (0/1)
     xy_size_compensation: str  # float
     z_offset: str  # float
+    zaa_enabled: str  # bool (0/1)
+    zaa_min_height: str  # float
 
 
 class GCode:

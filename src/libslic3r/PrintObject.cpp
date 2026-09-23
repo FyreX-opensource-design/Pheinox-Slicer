@@ -1202,6 +1202,7 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
             steps.emplace_back(posSlice);
         }
         else if (opt_key == "outer_wall_layer_height" || opt_key == "outer_wall_slope_antialiasing" ||
+                 opt_key == "zaa_enabled" || opt_key == "zaa_min_height" ||
                  opt_key == "seam_position" ||
                  opt_key == "scarf_seam_placement" ||
                  opt_key == "scarf_seam_only_on_smooth" || opt_key == "scarf_seam_start_height" ||

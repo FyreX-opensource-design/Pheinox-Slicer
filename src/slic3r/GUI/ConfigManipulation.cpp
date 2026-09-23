@@ -803,6 +803,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
 
     toggle_field("outer_wall_slope_antialiasing",
                  have_perimeters && config->opt_float("outer_wall_layer_height") > 0.);
+    toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
 
     bool have_wave_overhangs = have_perimeters && config->opt_bool("wave_overhangs");
     for (auto el : {"wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",

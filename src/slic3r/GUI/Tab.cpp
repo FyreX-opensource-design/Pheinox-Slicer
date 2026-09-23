@@ -2045,6 +2045,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("external_perimeters_first", category_path + "external-perimeters-first");
     optgroup->append_single_option_line("outer_wall_layer_height", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("outer_wall_slope_antialiasing", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("zaa_enabled", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("zaa_min_height", category_path + "outer-wall-layer-height");
 
     const std::string scarf_seam_path{"seam-position_151069#"};
     optgroup->append_single_option_line("scarf_seam_placement", scarf_seam_path + "scarf-joint-placement");

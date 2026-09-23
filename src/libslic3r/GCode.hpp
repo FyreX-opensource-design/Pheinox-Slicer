@@ -120,7 +120,7 @@ class GCodeGenerator
 {
 public:
     GCodeGenerator(const Print *print = nullptr); // The default value is only used in unit tests.
-    ~GCodeGenerator() = default;
+    ~GCodeGenerator();
 
     void set_preview_detail_threshold(size_t threshold) { m_preview_detail_threshold = threshold; }
 
@@ -498,6 +498,13 @@ private:
     std::string _extrude(const ExtrusionAttributes &attribs, const Geometry::ArcWelder::Path &path,
                          std::string_view description, double speed,
                          const EmitModifiers &emit_modifiers = EmitModifiers());
+
+    // Follow the model surface within this layer on top infill, ironing, and walls that the
+    // outer-wall stepper is not already placing.
+    void contour_top_surface(GCode::SmoothPath &path);
+    const class AABBMesh *zaa_mesh();
+    struct ZaaMesh;
+    std::unique_ptr<ZaaMesh> m_zaa_mesh;
 
     void print_machine_envelope(GCodeOutputStream &file, const Print &print);
     std::string _process_start_gcode(const Print &print, unsigned int current_extruder_id);

@@ -1453,6 +1453,27 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("zaa_enabled", coBool);
+    def->label = L("Z anti-aliasing");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Follow the model surface within each layer on top solid infill and ironing, so shallow "
+                     "tops are contoured instead of stair-stepped. Walls keep the outer-wall layer height and "
+                     "slope stepping when those are on. Off by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("zaa_min_height", coFloat);
+    def->label = L("Minimum Z height");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Thinnest bead Z anti-aliasing will leave under a top surface. The contour stays between "
+                     "this height and the top of the layer. Ironing is allowed to follow the surface a little "
+                     "above the layer so it rides the contoured top.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.06));
+
     def = this->add("outer_wall_slope_antialiasing", coBool);
     def->label = L("Antialias sloped outer walls");
     def->category = L("Layers and Perimeters");

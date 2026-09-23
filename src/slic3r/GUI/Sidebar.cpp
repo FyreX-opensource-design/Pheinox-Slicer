@@ -1709,6 +1709,8 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         CreateSettingRow(content, layer_group, "layer_height", _L("Layer height"));
         CreateSettingRow(content, layer_group, "outer_wall_layer_height", _L("Outer wall layer height"));
         CreateSettingRow(content, layer_group, "outer_wall_slope_antialiasing", _L("Antialias sloped outer walls"));
+        CreateSettingRow(content, layer_group, "zaa_enabled", _L("Z anti-aliasing"));
+        CreateSettingRow(content, layer_group, "zaa_min_height", _L("Minimum Z height"));
         CreateSettingRow(content, layer_group, "first_layer_height", _L("First layer height"));
         CreateSettingRow(content, layer_group, "color_mixing_base_layers", _L("Color mixing base layers"));
         CreateSettingRow(content, layer_group, "color_mixing_base_extruder", _L("Color mixing base filament"));
@@ -3112,6 +3114,7 @@ void PrintSettingsPanel::ApplyToggleLogic()
 
     ToggleOption("outer_wall_slope_antialiasing",
                  have_perimeters && config.opt_float("outer_wall_layer_height") > 0.);
+    ToggleOption("zaa_min_height", config.opt_bool("zaa_enabled"));
 
     bool have_wave_overhangs = have_perimeters && config.opt_bool("wave_overhangs");
     for (const char *el :
