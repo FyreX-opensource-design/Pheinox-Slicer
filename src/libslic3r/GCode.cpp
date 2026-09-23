@@ -4891,26 +4891,286 @@ GCode::SmoothPath with_pass_flow(const GCode::SmoothPath &src, double flow_facto
     return out;
 }
 
-// t = 1 keeps the sliced contour. t = 0 moves each supported point onto the lower layer's contour.
-GCode::SmoothPath morph_toward_lower(const GCode::SmoothPath &src, const ExPolygons &lower, double t)
+// Place `p` a fraction `t` of the way from the lower layer's wall centerline to `p`.
+// `inset` is half the extrusion width in scaled units, the gap between a wall centerline and the slice outline.
+Point step_toward_lower_wall(const ExPolygons &lower, const Point &p, double t, double inset)
+{
+    if (!slice_contains(lower, p))
+        return p;
+    Point q = project_onto_slices(lower, p);
+    const Vec2d pv = p.cast<double>();
+    const Vec2d away = pv - q.cast<double>();
+    const double len = away.norm();
+    if (inset > 0. && len > inset)
+        q = Point{coord_t(std::lround(q.x() + away.x() * inset / len)),
+                  coord_t(std::lround(q.y() + away.y() * inset / len))};
+    const Vec2d blended = q.cast<double>() + t * (pv - q.cast<double>());
+    return Point{coord_t(std::lround(blended.x())), coord_t(std::lround(blended.y()))};
+}
+
+Vec2d to_vec(const Point &point)
+{
+    return point.cast<double>();
+}
+
+Point to_point(const Vec2d &point)
+{
+    return Point{coord_t(std::lround(point.x())), coord_t(std::lround(point.y()))};
+}
+
+// Shift of one sample toward the lower wall. Anything larger than a couple of millimetres is a bad
+// projection (a point inside the part, or a line extended across it) and is ignored.
+Vec2d wall_shift(const ExPolygons &lower, const Vec2d &sample, double t, double inset)
+{
+    const Vec2d stepped = to_vec(step_toward_lower_wall(lower, to_point(sample), t, inset));
+    const Vec2d disp = stepped - sample;
+    return disp.norm() <= scale_(2.) ? disp : Vec2d::Zero();
+}
+
+bool corner_turn(const Vec2d &incoming, const Vec2d &outgoing)
+{
+    const double in_len = incoming.norm();
+    const double out_len = outgoing.norm();
+    if (in_len < 1. || out_len < 1.)
+        return false;
+    // About 20 degrees.
+    const double c = std::clamp(incoming.dot(outgoing) / (in_len * out_len), -1., 1.);
+    return c < 0.9397;
+}
+
+// t = 1 keeps the sliced contour. t = 0 moves each supported point onto the lower layer's wall
+// centerline. Each straight edge takes one shift, measured on the edge itself. A corner is where the
+// two shifted edges meet, so it stays square instead of bending onto the nearer side.
+GCode::SmoothPath morph_toward_lower(const GCode::SmoothPath &src, const ExPolygons &lower, double t, double inset)
 {
     if (t >= 1.0 - 1e-6)
         return src;
+    const double spacing = scale_(0.4);
     GCode::SmoothPath out = src;
     for (GCode::SmoothPathElement &el : out)
     {
-        for (Geometry::ArcWelder::Segment &seg : el.path)
+        if (el.path.size() < 2)
+            continue;
+
+        std::vector<Vec2d> pts;
+        pts.push_back(to_vec(el.path.front().point));
+        for (size_t i = 1; i < el.path.size(); ++i)
         {
-            seg.radius = 0.f;
-            if (!slice_contains(lower, seg.point))
-                continue;
-            const Point q = project_onto_slices(lower, seg.point);
-            const Vec2d p = seg.point.cast<double>();
-            const Vec2d blended = q.cast<double>() + t * (p - q.cast<double>());
-            seg.point = Point{coord_t(std::lround(blended.x())), coord_t(std::lround(blended.y()))};
+            const Geometry::ArcWelder::Segment &prev = el.path[i - 1];
+            const Geometry::ArcWelder::Segment &seg = el.path[i];
+            const Vec2d a = to_vec(prev.point);
+            const Vec2d b = to_vec(seg.point);
+            if (std::abs(seg.radius) > 1e-6)
+            {
+                const double radius = double(seg.radius);
+                const Vec2d center = Geometry::ArcWelder::arc_center(a, b, radius, seg.ccw());
+                const double arc_len = Geometry::ArcWelder::arc_length(a, b, center, seg.ccw());
+                if (std::isfinite(arc_len) && arc_len > spacing)
+                {
+                    const int n = std::max(1, static_cast<int>(std::ceil(arc_len / spacing)));
+                    for (int k = 1; k < n; ++k)
+                        pts.push_back(Geometry::ArcWelder::arc_point_at_distance(a, b, center, seg.ccw(),
+                                                                                 arc_len * k / double(n)));
+                }
+            }
+            if (pts.empty() || (pts.back() - b).squaredNorm() > 1.)
+                pts.push_back(b);
         }
+        if (pts.size() < 2)
+            continue;
+
+        bool closed = (pts.front() - pts.back()).norm() < scale_(0.05);
+        if (closed)
+            pts.pop_back();
+        const int n = static_cast<int>(pts.size());
+        if (n < 2)
+            continue;
+
+        auto at = [&](int i)
+        {
+            return pts[(i % n + n) % n];
+        };
+        std::vector<int> corners;
+        if (!closed)
+            corners.push_back(0);
+        for (int i = closed ? 0 : 1; i < (closed ? n : n - 1); ++i)
+        {
+            if (corner_turn(at(i) - at(i - 1), at(i + 1) - at(i)))
+                corners.push_back(i);
+        }
+        if (!closed)
+            corners.push_back(n - 1);
+
+        std::vector<Vec2d> shifted = pts;
+        if (corners.size() < 2)
+        {
+            for (int i = 0; i < n; ++i)
+                shifted[i] = pts[i] + wall_shift(lower, pts[i], t, inset);
+        }
+        else
+        {
+            struct Edge
+            {
+                int a;
+                int b;
+                Vec2d disp_start;
+                Vec2d disp_end;
+            };
+            std::vector<Edge> edges;
+            auto add_edge = [&](int a, int b)
+            {
+                std::vector<int> idx;
+                for (int i = a;; i = (i + 1) % n)
+                {
+                    idx.push_back(i);
+                    if (i == b || idx.size() > static_cast<size_t>(n))
+                        break;
+                    if (!closed && i == n - 1)
+                        break;
+                }
+                if (idx.size() < 2 || idx.back() != b)
+                    return;
+                double length = 0.;
+                for (size_t k = 1; k < idx.size(); ++k)
+                    length += (pts[idx[k]] - pts[idx[k - 1]]).norm();
+                auto point_at = [&](double dist_from_start) -> Vec2d
+                {
+                    double walked_to = 0.;
+                    for (size_t k = 1; k < idx.size(); ++k)
+                    {
+                        const Vec2d seg = pts[idx[k]] - pts[idx[k - 1]];
+                        const double seg_len = seg.norm();
+                        if (walked_to + seg_len >= dist_from_start && seg_len > 1.)
+                            return pts[idx[k - 1]] + seg * ((dist_from_start - walked_to) / seg_len);
+                        walked_to += seg_len;
+                    }
+                    return pts[idx.back()];
+                };
+                // Measure at the middle of the edge. A sample near a corner is closer to the
+                // neighboring wall than to a steep slope, so it would leave that edge unmoved.
+                const Vec2d disp = wall_shift(lower, point_at(length * 0.5), t, inset);
+                edges.push_back({a, b, disp, disp});
+                for (int i : idx)
+                    shifted[i] = pts[i] + disp;
+            };
+
+            if (closed)
+            {
+                for (size_t k = 0; k < corners.size(); ++k)
+                    add_edge(corners[k], corners[(k + 1) % corners.size()]);
+            }
+            else
+            {
+                for (size_t k = 0; k + 1 < corners.size(); ++k)
+                    add_edge(corners[k], corners[k + 1]);
+            }
+
+            const double miter_limit = scale_(1.5);
+            for (size_t k = 0; k < edges.size(); ++k)
+            {
+                const Edge *next = nullptr;
+                if (closed)
+                    next = &edges[(k + 1) % edges.size()];
+                else if (k + 1 < edges.size())
+                    next = &edges[k + 1];
+                if (next == nullptr || next->a != edges[k].b)
+                    continue;
+                const int c = edges[k].b;
+                const int prev_i = closed ? (c + n - 1) % n : c - 1;
+                const int next_i = closed ? (c + 1) % n : c + 1;
+                if (prev_i < 0 || next_i >= n)
+                    continue;
+                const Vec2d p0 = pts[prev_i] + edges[k].disp_end;
+                const Vec2d p1 = pts[c] + edges[k].disp_end;
+                const Vec2d q0 = pts[c] + next->disp_start;
+                const Vec2d q1 = pts[next_i] + next->disp_start;
+                const Vec2d r = p1 - p0;
+                const Vec2d s = q1 - q0;
+                const double den = cross2(r, s);
+                if (std::abs(den) < 1. || r.squaredNorm() < 1. || s.squaredNorm() < 1.)
+                    continue;
+                const double param = cross2(q0 - p0, s) / den;
+                const Vec2d hit = p0 + param * r;
+                if (std::isfinite(hit.x()) && std::isfinite(hit.y()) && (hit - pts[c]).norm() <= miter_limit)
+                    shifted[c] = hit;
+            }
+        }
+
+        Geometry::ArcWelder::Segment templ = el.path.front();
+        templ.radius = 0.f;
+        Geometry::ArcWelder::Path dense;
+        dense.reserve(shifted.size() + 1);
+        auto push_pt = [&](const Vec2d &point)
+        {
+            const Point rounded = to_point(point);
+            if (!dense.empty() && dense.back().point == rounded)
+                return;
+            templ.point = rounded;
+            dense.push_back(templ);
+        };
+        for (const Vec2d &point : shifted)
+            push_pt(point);
+        if (closed)
+            push_pt(shifted.front());
+        if (dense.size() >= 2)
+            el.path = std::move(dense);
     }
     return out;
+}
+
+struct CollectedPath
+{
+    Points pts;
+    bool closed{false};
+};
+
+CollectedPath collect_path_points(const GCode::SmoothPath &path)
+{
+    CollectedPath out;
+    for (const GCode::SmoothPathElement &el : path)
+        for (const Geometry::ArcWelder::Segment &seg : el.path)
+            if (out.pts.empty() || out.pts.back() != seg.point)
+                out.pts.push_back(seg.point);
+    out.closed = out.pts.size() >= 2 && out.pts.front() == out.pts.back();
+    if (out.closed)
+        out.pts.pop_back();
+    return out;
+}
+
+double dist_point_seg(const Point &p, const Point &a, const Point &b)
+{
+    const Vec2d ab = (b - a).cast<double>();
+    const double len2 = ab.squaredNorm();
+    if (len2 < 1.)
+        return (p - a).cast<double>().norm();
+    const double u = std::clamp((p - a).cast<double>().dot(ab) / len2, 0., 1.);
+    return (p.cast<double>() - (a.cast<double>() + u * ab)).norm();
+}
+
+// How far `from` sits outside `to`, in scaled units.
+double mean_separation(const GCode::SmoothPath &from, const GCode::SmoothPath &to)
+{
+    const CollectedPath a = collect_path_points(from);
+    const CollectedPath b = collect_path_points(to);
+    if (a.pts.empty() || b.pts.size() < 2)
+        return 0.;
+    double sum = 0.;
+    if (a.pts.size() == b.pts.size())
+    {
+        for (size_t i = 0; i < a.pts.size(); ++i)
+            sum += (a.pts[i] - b.pts[i]).cast<double>().norm();
+        return sum / double(a.pts.size());
+    }
+    for (const Point &pt : a.pts)
+    {
+        double best = std::numeric_limits<double>::infinity();
+        for (size_t i = 1; i < b.pts.size(); ++i)
+            best = std::min(best, dist_point_seg(pt, b.pts[i - 1], b.pts[i]));
+        if (b.closed)
+            best = std::min(best, dist_point_seg(pt, b.pts.back(), b.pts.front()));
+        sum += best;
+    }
+    return sum / double(a.pts.size());
 }
 } // namespace
 
@@ -4930,36 +5190,151 @@ bool GCodeGenerator::extrude_smooth_outer_wall(const GCode::SmoothPath &smooth_p
     if (layer_h / pass_h > 12.)
         pass_h = layer_h / 12.;
 
-    const ExPolygons *lower = (m_layer->lower_layer != nullptr) ? &m_layer->lower_layer->lslices : nullptr;
-    const double slope_thresh = std::max(scale_(0.15), scale_(double(smooth_path.front().path_attributes.width) * 0.35));
-    int total = 0;
-    int sloped = 0;
-    int overhang = 0;
-    if (lower != nullptr)
+    // The path is a centerline, about half a line width inside the slice. A vertical wall stays
+    // that close to the previous layer's outline. Anything deeper is a slope and is stepped.
+    const ExPolygons *lower = (m_layer->lower_layer != nullptr && !m_layer->lower_layer->lslices.empty())
+                                  ? &m_layer->lower_layer->lslices
+                                  : nullptr;
+    const double half_width = scale_(std::max(0.05, double(smooth_path.front().path_attributes.width) * 0.5));
+    const double vertical_reach = half_width + scale_(0.05);
+
+    enum class SpanKind { Vertical, Sloped, Overhang };
+    auto kind_of = [&](const Point &pt)
     {
-        for (const GCode::SmoothPathElement &el : smooth_path)
+        if (lower == nullptr)
+            return SpanKind::Vertical;
+        const Point q = project_onto_slices(*lower, pt);
+        const double dist = (q - pt).cast<double>().norm();
+        if (!slice_contains(*lower, pt))
+            return dist <= scale_(0.05) ? SpanKind::Vertical : SpanKind::Overhang;
+        return dist <= vertical_reach ? SpanKind::Vertical : SpanKind::Sloped;
+    };
+    struct Span
+    {
+        SpanKind kind;
+        GCode::SmoothPath path;
+    };
+    std::vector<Span> spans;
+    // A wall is often one segment from a sloping end to a vertical end. Sample along it and split
+    // where the slope stops, instead of stepping the whole wall.
+    const double sample_spacing = scale_(0.8);
+    for (const GCode::SmoothPathElement &el : smooth_path)
+    {
+        if (el.path.size() < 2)
+            continue;
+        SpanKind run_kind = SpanKind::Vertical;
+        bool have_kind = false;
+        Geometry::ArcWelder::Path run;
+        auto flush = [&]()
         {
-            for (const Geometry::ArcWelder::Segment &seg : el.path)
+            if (run.size() < 2)
+                return;
+            if (!spans.empty() && spans.back().kind == run_kind && !spans.back().path.empty() &&
+                spans.back().path.back().path_attributes == el.path_attributes)
             {
-                ++total;
-                const Point q = project_onto_slices(*lower, seg.point);
-                const double dist = (q - seg.point).cast<double>().norm();
-                if (dist <= slope_thresh)
-                    continue;
-                if (slice_contains(*lower, seg.point))
-                    ++sloped;
+                Geometry::ArcWelder::Path &dst = spans.back().path.back().path;
+                dst.insert(dst.end(), run.begin() + (dst.back().point == run.front().point ? 1 : 0), run.end());
+            }
+            else if (!spans.empty() && spans.back().kind == run_kind)
+            {
+                spans.back().path.push_back(el);
+                spans.back().path.back().path = std::move(run);
+                run.clear();
+            }
+            else
+            {
+                Span span;
+                span.kind = run_kind;
+                span.path.assign(1, el);
+                span.path.front().path = std::move(run);
+                run.clear();
+                spans.push_back(std::move(span));
+            }
+        };
+        auto consider = [&](const Point &pt, SpanKind kind)
+        {
+            if (!have_kind || (kind != run_kind && run.size() < 2))
+            {
+                run_kind = kind;
+                have_kind = true;
+            }
+            else if (kind != run_kind)
+            {
+                const Point bridge = run.back().point;
+                flush();
+                run.clear();
+                Geometry::ArcWelder::Segment seam;
+                seam.point = bridge;
+                run.push_back(seam);
+                run_kind = kind;
+            }
+            if (!run.empty() && run.back().point == pt)
+                return;
+            Geometry::ArcWelder::Segment seg;
+            seg.point = pt;
+            run.push_back(seg);
+        };
+
+        consider(el.path.front().point, kind_of(el.path.front().point));
+        for (size_t i = 1; i < el.path.size(); ++i)
+        {
+            const Geometry::ArcWelder::Segment &prev = el.path[i - 1];
+            const Geometry::ArcWelder::Segment &seg = el.path[i];
+            const Vec2d a = prev.point.cast<double>();
+            const Vec2d b = seg.point.cast<double>();
+            std::vector<Vec2d> samples;
+            if (std::abs(seg.radius) > 1e-6)
+            {
+                const double radius = double(seg.radius);
+                const Vec2d center = Geometry::ArcWelder::arc_center(a, b, radius, seg.ccw());
+                const double arc_len = Geometry::ArcWelder::arc_length(a, b, center, seg.ccw());
+                if (std::isfinite(arc_len) && arc_len > sample_spacing)
+                {
+                    const int n = std::max(1, static_cast<int>(std::ceil(arc_len / sample_spacing)));
+                    for (int k = 1; k <= n; ++k)
+                        samples.push_back(Geometry::ArcWelder::arc_point_at_distance(a, b, center, seg.ccw(),
+                                                                                     arc_len * k / double(n)));
+                }
                 else
-                    ++overhang;
+                    samples.push_back(b);
+            }
+            else
+            {
+                const double len = (b - a).norm();
+                const int n = std::max(1, static_cast<int>(std::ceil(len / sample_spacing)));
+                for (int k = 1; k <= n; ++k)
+                    samples.push_back(a + (b - a) * (double(k) / double(n)));
+            }
+            Vec2d prev_s = a;
+            for (const Vec2d &sample : samples)
+            {
+                const Vec2d mid = 0.5 * (prev_s + sample);
+                consider(to_point(sample), kind_of(to_point(mid)));
+                prev_s = sample;
             }
         }
+        flush();
+    }
+    // A loop often starts mid-span. Join the two ends when they are the same kind.
+    if (is_loop && spans.size() >= 2 && spans.front().kind == spans.back().kind)
+    {
+        GCode::SmoothPath &dst = spans.back().path;
+        dst.insert(dst.end(), spans.front().path.begin(), spans.front().path.end());
+        spans.erase(spans.begin());
     }
 
-    // An unsupported loop printed several times would stack plastic in the air.
-    if (total > 0 && overhang * 2 > total)
+    const int n_ceil = std::max(1, static_cast<int>(std::ceil(layer_h / pass_h - 1e-9)));
+    const int n_floor = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-9)));
+    const int n_vert = (std::abs(layer_h / n_ceil - pass_h) <= std::abs(layer_h / n_floor - pass_h)) ? n_ceil : n_floor;
+    const bool one_span = spans.size() == 1;
+    bool antialias = false;
+    for (const Span &span : spans)
+    {
+        if (span.kind == SpanKind::Sloped || (span.kind == SpanKind::Vertical && n_vert >= 2))
+            antialias = true;
+    }
+    if (!antialias)
         return false;
-
-    const bool curved_top = total > 0 && sloped * 2 > total;
-    const bool last_is_loop = is_loop;
 
     auto emit_pass = [&](const GCode::SmoothPath &path, double bead_h, float height_fraction, bool loop)
     {
@@ -4973,75 +5348,102 @@ bool GCodeGenerator::extrude_smooth_outer_wall(const GCode::SmoothPath &smooth_p
                                            loop, description, speed, loop ? wipe_offset : 0);
     };
 
-    if (!curved_top)
+    auto emit_vertical = [&](const GCode::SmoothPath &path, bool loop)
     {
-        // Vertical wall: equal passes that sum to the layer, same contour. Same choice as
-        // Smoothificator_Adaptive — pick the split whose pass height is closest to the request.
-        const int n_ceil = std::max(1, static_cast<int>(std::ceil(layer_h / pass_h - 1e-9)));
-        const int n_floor = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-9)));
-        const int n = (std::abs(layer_h / n_ceil - pass_h) <= std::abs(layer_h / n_floor - pass_h)) ? n_ceil : n_floor;
-        if (n < 2)
-            return false;
-        const double bead = layer_h / n;
-        for (int k = 1; k <= n; ++k)
+        if (n_vert < 2)
         {
-            const float hf = float(k - n + 1);
-            emit_pass(smooth_path, bead, hf, last_is_loop && k == n);
+            emit_pass(path, layer_h, 1.f, loop);
+            return;
         }
-        return true;
-    }
+        const double bead = layer_h / n_vert;
+        for (int k = 1; k <= n_vert; ++k)
+            emit_pass(path, bead, float(k - n_vert + 1), loop && k == n_vert);
+    };
 
-    // Curved top: step the wall by the outer-wall height from the previous contour up to this
-    // one. A leftover shorter than one step is dithered along the wall.
-    const int n_full = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-4)));
-    const double remainder = layer_h - n_full * pass_h;
-    if (remainder > 0.02 && lower != nullptr)
+    // Sloped top: step from the lower wall up to this one in increments of the outer-wall
+    // height. A leftover shorter than one step is dithered along the wall.
+    auto emit_sloped = [&](const GCode::SmoothPath &path, bool loop)
     {
-        const double fraction = remainder / pass_h;
-        const double t = remainder / layer_h;
-        const float hf = float(1.0 - n_full * pass_h / remainder);
-        const GCode::SmoothPath morphed = morph_toward_lower(smooth_path, *lower, t);
-        for (const GCode::SmoothPathElement &el : morphed)
+        const int n_full = std::max(1, static_cast<int>(std::floor(layer_h / pass_h + 1e-4)));
+        const double remainder = layer_h - n_full * pass_h;
+        if (remainder > 0.02 && lower != nullptr)
         {
-            Geometry::ArcWelder::Path run;
-            Geometry::ArcWelder::Segment prev{};
-            bool have_prev = false;
-            auto flush = [&]()
+            const double fraction = remainder / pass_h;
+            const double t = remainder / layer_h;
+            const float hf = float(1.0 - n_full * pass_h / remainder);
+            const GCode::SmoothPath morphed = morph_toward_lower(path, *lower, t, half_width);
+            for (const GCode::SmoothPathElement &el : morphed)
             {
-                if (run.size() >= 2)
+                Geometry::ArcWelder::Path kept;
+                Geometry::ArcWelder::Segment prev{};
+                bool have_prev = false;
+                auto flush_kept = [&]()
                 {
-                    GCode::SmoothPath piece(1, el);
-                    piece.front().path = run;
-                    emit_pass(piece, remainder, hf, false);
-                }
-                run.clear();
-            };
-            for (const Geometry::ArcWelder::Segment &seg : el.path)
-            {
-                if (bayer_keeps(seg.point, fraction))
+                    if (kept.size() >= 2)
+                    {
+                        GCode::SmoothPath piece(1, el);
+                        piece.front().path = kept;
+                        emit_pass(piece, remainder, hf, false);
+                    }
+                    kept.clear();
+                };
+                for (const Geometry::ArcWelder::Segment &seg : el.path)
                 {
-                    if (run.empty() && have_prev)
-                        run.push_back(prev);
-                    run.push_back(seg);
+                    if (bayer_keeps(seg.point, fraction))
+                    {
+                        if (kept.empty() && have_prev)
+                            kept.push_back(prev);
+                        kept.push_back(seg);
+                    }
+                    else
+                        flush_kept();
+                    prev = seg;
+                    have_prev = true;
                 }
-                else
-                {
-                    flush();
-                }
-                prev = seg;
-                have_prev = true;
+                flush_kept();
             }
-            flush();
         }
-    }
+        for (int i = n_full - 1; i >= 0; --i)
+        {
+            const double drop = i * pass_h;
+            const double t = (layer_h - drop) / layer_h;
+            const float hf = float(1.0 - i);
+            const GCode::SmoothPath stepped = (lower != nullptr) ? morph_toward_lower(path, *lower, t, half_width) : path;
+            emit_pass(stepped, pass_h, hf, loop && i == 0);
+            // The surface wall is the outer edge of this step. Stack more outer walls under the
+            // higher steps, back to this layer's own wall, so the tread is not hollow.
+            if (t < 1.0 - 1e-4 && lower != nullptr && !path.empty())
+            {
+                const double gap = mean_separation(stepped, path);
+                const double width_s = scale_(std::max(0.05, double(path.front().path_attributes.width)));
+                const double min_gap = width_s * 0.4;
+                if (gap > scale_(0.12))
+                {
+                    double covered = 0.;
+                    const int wall_budget = std::max(1, m_config.perimeters.value);
+                    for (int n = 1; n <= wall_budget && covered + width_s < gap - min_gap; ++n)
+                    {
+                        const double inset = n * width_s;
+                        const double t_wall = t + (1. - t) * (inset / gap);
+                        emit_pass(morph_toward_lower(path, *lower, t_wall, half_width), pass_h, hf, false);
+                        covered = inset;
+                    }
+                    if (gap - covered >= min_gap)
+                        emit_pass(path, pass_h, hf, false);
+                }
+            }
+        }
+    };
 
-    for (int i = n_full - 1; i >= 0; --i)
+    for (const Span &span : spans)
     {
-        const double drop = i * pass_h;
-        const double t = (layer_h - drop) / layer_h;
-        const float hf = float(1.0 - i);
-        const GCode::SmoothPath path = (lower != nullptr) ? morph_toward_lower(smooth_path, *lower, t) : smooth_path;
-        emit_pass(path, pass_h, hf, last_is_loop && i == 0);
+        const bool loop = one_span && is_loop;
+        if (span.kind == SpanKind::Sloped)
+            emit_sloped(span.path, loop);
+        else if (span.kind == SpanKind::Vertical)
+            emit_vertical(span.path, loop);
+        else
+            emit_pass(span.path, layer_h, 1.f, loop);
     }
     return true;
 }
