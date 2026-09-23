@@ -5048,7 +5048,16 @@ GCode::SmoothPath morph_toward_lower(const GCode::SmoothPath &src, const ExPolyg
                 };
                 // Measure at the middle of the edge. A sample near a corner is closer to the
                 // neighboring wall than to a steep slope, so it would leave that edge unmoved.
-                const Vec2d disp = wall_shift(lower, point_at(length * 0.5), t, inset);
+                // Keep only the part across the edge. A shift along the edge slides a short wall,
+                // such as the side of an eye, out past its corner.
+                Vec2d disp = wall_shift(lower, point_at(length * 0.5), t, inset);
+                const Vec2d chord = pts[idx.back()] - pts[idx.front()];
+                const double chord_len = chord.norm();
+                if (chord_len > 1.)
+                {
+                    const Vec2d dir = chord / chord_len;
+                    disp -= dir * disp.dot(dir);
+                }
                 edges.push_back({a, b, disp, disp});
                 for (int i : idx)
                     shifted[i] = pts[i] + disp;
@@ -5438,9 +5447,9 @@ bool GCodeGenerator::extrude_smooth_outer_wall(const GCode::SmoothPath &smooth_p
     for (const Span &span : spans)
     {
         const bool loop = one_span && is_loop;
-        if (span.kind == SpanKind::Sloped)
+        if (span.kind == SpanKind::Sloped && m_config.outer_wall_slope_antialiasing.value)
             emit_sloped(span.path, loop);
-        else if (span.kind == SpanKind::Vertical)
+        else if (span.kind == SpanKind::Vertical || span.kind == SpanKind::Sloped)
             emit_vertical(span.path, loop);
         else
             emit_pass(span.path, layer_h, 1.f, loop);

@@ -579,6 +579,7 @@ static std::vector<std::string> s_Preset_print_options{
     "seam_gap_distance",
     "external_perimeters_first",
     "outer_wall_layer_height",
+    "outer_wall_slope_antialiasing",
     "fill_density",
     "fill_pattern",
     "custom_infill_source",

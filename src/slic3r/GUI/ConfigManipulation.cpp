@@ -795,10 +795,14 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
                     "wave_overhang_print_speed", "wave_overhang_travel_speed", "wave_overhang_fan_speed", "thin_walls",
                     "overhangs", "seam_position",
                     "staggered_inner_seams", "seam_type", "seam_notch_width", "seam_notch_angle",
-                    "external_perimeters_first", "outer_wall_layer_height", "external_perimeter_extrusion_width",
+                    "external_perimeters_first", "outer_wall_layer_height", "outer_wall_slope_antialiasing",
+                    "external_perimeter_extrusion_width",
                     "perimeter_speed",
                     "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
         toggle_field(el, have_perimeters);
+
+    toggle_field("outer_wall_slope_antialiasing",
+                 have_perimeters && config->opt_float("outer_wall_layer_height") > 0.);
 
     bool have_wave_overhangs = have_perimeters && config->opt_bool("wave_overhangs");
     for (auto el : {"wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",

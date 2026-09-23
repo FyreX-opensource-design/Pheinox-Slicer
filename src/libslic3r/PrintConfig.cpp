@@ -1446,16 +1446,23 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Layers and Perimeters");
     def->tooltip = L("Print external perimeters as several thinner passes at this height, the same idea as the "
                      "Smoothificator post-process. 0 uses the normal layer height. Vertical walls are split into "
-                     "equal passes that add up to the layer. Where the wall slopes inward toward a top, and this "
-                     "height is smaller than the layer, those slopes are antialiased in steps of this height between "
-                     "the previous wall and this one. A leftover shorter than one step is dithered along the wall. "
-                     "Outer walls are also stacked at this height under each step, back to this layer's wall. "
-                     "Works best with external perimeters printed first.");
+                     "equal passes that add up to the layer. Works best with external perimeters printed first.");
     def->sidetext = L("mm");
     def->min = 0;
     def->max = 2;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("outer_wall_slope_antialiasing", coBool);
+    def->label = L("Antialias sloped outer walls");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Where an outer wall slopes inward toward a top, and outer wall layer height is smaller than "
+                     "the layer, step that slope between the previous wall and this one. A leftover shorter than one "
+                     "step is dithered along the wall, and outer walls are stacked under each step back to this "
+                     "layer's wall. Leave this off for recesses such as eyes, which are stacked at the thinner "
+                     "height on this layer's wall instead.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("extra_perimeters", coBool);
     def->label = L("Extra perimeters if needed");

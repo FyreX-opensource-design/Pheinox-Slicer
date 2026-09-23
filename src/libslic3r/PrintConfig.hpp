@@ -1050,7 +1050,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, external_perimeter_speed))((ConfigOptionBool, enable_dynamic_overhang_speeds))(
         (ConfigOptionFloatOrPercent, overhang_speed_0))((ConfigOptionFloatOrPercent, overhang_speed_1))(
         (ConfigOptionFloatOrPercent, overhang_speed_2))((ConfigOptionFloatOrPercent, overhang_speed_3))(
-        (ConfigOptionBool, external_perimeters_first))((ConfigOptionFloat, outer_wall_layer_height))((ConfigOptionBool, extra_perimeters))(
+        (ConfigOptionBool, external_perimeters_first))((ConfigOptionFloat, outer_wall_layer_height))(
+        (ConfigOptionBool, outer_wall_slope_antialiasing))((ConfigOptionBool, extra_perimeters))(
         (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(
         (ConfigOptionBool, wave_overhangs_instead_of_bridges))((ConfigOptionInt, wave_overhang_outer_perimeters))(
         (ConfigOptionFloat, wave_overhang_perimeter_overlap))((ConfigOptionFloat, wave_overhang_minimum_width))(

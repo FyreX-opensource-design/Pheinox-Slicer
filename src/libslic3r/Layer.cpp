@@ -788,6 +788,7 @@ inline bool has_compatible_layer_regions(const PrintRegionConfig &config, const 
            config.thin_walls == other_config.thin_walls &&
            config.external_perimeters_first == other_config.external_perimeters_first &&
            config.outer_wall_layer_height == other_config.outer_wall_layer_height &&
+           config.outer_wall_slope_antialiasing == other_config.outer_wall_slope_antialiasing &&
            config.infill_overlap == other_config.infill_overlap &&
            has_compatible_dynamic_overhang_speed(config, other_config);
 }
