@@ -206,7 +206,9 @@ static const t_config_enum_values s_keys_map_InfillPattern{{"rectilinear", ipRec
                                                            {"custom", ipCustom},
                                                            {"cat", ipCat},
                                                            {"catmirrored", ipCatMirrored},
-                                                           {"cattiled", ipCatTiled}};
+                                                           {"cattiled", ipCatTiled},
+                                                           {"sharkfill", ipShark},
+                                                           {"puppyfill", ipPuppy}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
 static const t_config_enum_values s_keys_map_IroningType{{"top", int(IroningType::TopSurfaces)},
@@ -2206,7 +2208,9 @@ void PrintConfigDef::init_fff_params()
         {"custom", L("Custom")},
         {"cat", L("Cat")},
         {"catmirrored", L("Cat mirrored")},
-        {"cattiled", L("Cat tiled")}});
+        {"cattiled", L("Cat tiled")},
+        {"sharkfill", L("Sharkfill")},
+        {"puppyfill", L("Puppyfill")}});
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipStars));
 
     def = this->add("custom_infill_source", coEnum);

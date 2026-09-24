@@ -250,6 +250,10 @@ static const char *dbg_pattern(InfillPattern p)
         return "CatMirrored";
     case ipCatTiled:
         return "CatTiled";
+    case ipShark:
+        return "Sharkfill";
+    case ipPuppy:
+        return "Puppyfill";
     default:
         return "UNKNOWN";
     }
@@ -2388,6 +2392,8 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipCat:
         case ipCatMirrored:
         case ipCatTiled:
+        case ipShark:
+        case ipPuppy:
             break;
         }
 

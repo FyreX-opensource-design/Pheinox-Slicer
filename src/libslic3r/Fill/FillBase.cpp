@@ -107,6 +107,10 @@ Fill *Fill::new_from_type(const InfillPattern type)
         return new FillCatMirrored();
     case ipCatTiled:
         return new FillCatTiled();
+    case ipShark:
+        return new FillShark();
+    case ipPuppy:
+        return new FillPuppy();
     default:
         throw Slic3r::InvalidArgument("unknown type");
     }

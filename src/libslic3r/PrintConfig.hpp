@@ -257,6 +257,8 @@ enum InfillPattern : int
     ipCat,
     ipCatMirrored,
     ipCatTiled,
+    ipShark,
+    ipPuppy,
     ipCount,
 };
 

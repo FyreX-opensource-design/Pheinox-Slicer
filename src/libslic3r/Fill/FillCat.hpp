@@ -57,6 +57,36 @@ protected:
                               Polylines &polylines_out) override;
 };
 
+// Continuous-line sharks. Each stroke runs from one tail tip to the next.
+class FillShark : public Fill
+{
+public:
+    Fill *clone() const override { return new FillShark(*this); }
+    ~FillShark() override = default;
+    bool is_self_crossing() override { return true; }
+
+protected:
+    float _layer_angle(size_t) const override { return 0.f; }
+    void _fill_surface_single(const FillParams &params, unsigned int thickness_layers,
+                              const std::pair<float, Point> &direction, ExPolygon expolygon,
+                              Polylines &polylines_out) override;
+};
+
+// Interlocking puppy faces, two offset rows to a tile.
+class FillPuppy : public Fill
+{
+public:
+    Fill *clone() const override { return new FillPuppy(*this); }
+    ~FillPuppy() override = default;
+    bool is_self_crossing() override { return true; }
+
+protected:
+    float _layer_angle(size_t) const override { return 0.f; }
+    void _fill_surface_single(const FillParams &params, unsigned int thickness_layers,
+                              const std::pair<float, Point> &direction, ExPolygon expolygon,
+                              Polylines &polylines_out) override;
+};
+
 } // namespace Slic3r
 
 #endif
