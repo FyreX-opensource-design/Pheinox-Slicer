@@ -10,13 +10,44 @@
 namespace Slic3r
 {
 
-// Tiled cat: two rounded ears on a line, a spiral tail, and the same shape
-// turned halfway around. Traced from the MakerBot Cat Fill print.
+// MakerBot Cat Fill. Two strokes traced from the original tile: the head and
+// body, and the spiral tail. A vertical line on the tile edge meets the next row.
 class FillCat : public Fill
 {
 public:
     Fill *clone() const override { return new FillCat(*this); }
     ~FillCat() override = default;
+    bool is_self_crossing() override { return true; }
+
+protected:
+    float _layer_angle(size_t) const override { return 0.f; }
+    void _fill_surface_single(const FillParams &params, unsigned int thickness_layers,
+                              const std::pair<float, Point> &direction, ExPolygon expolygon,
+                              Polylines &polylines_out) override;
+};
+
+// The earlier drawn cat: ears on a line, a spiral, and that shape turned
+// halfway around. Kept as its own pattern once Cat took the original tile.
+class FillCatMirrored : public Fill
+{
+public:
+    Fill *clone() const override { return new FillCatMirrored(*this); }
+    ~FillCatMirrored() override = default;
+    bool is_self_crossing() override { return true; }
+
+protected:
+    float _layer_angle(size_t) const override { return 0.f; }
+    void _fill_surface_single(const FillParams &params, unsigned int thickness_layers,
+                              const std::pair<float, Point> &direction, ExPolygon expolygon,
+                              Polylines &polylines_out) override;
+};
+
+// The cat field: several cats in one rectangle, repeating in both directions.
+class FillCatTiled : public Fill
+{
+public:
+    Fill *clone() const override { return new FillCatTiled(*this); }
+    ~FillCatTiled() override = default;
     bool is_self_crossing() override { return true; }
 
 protected:

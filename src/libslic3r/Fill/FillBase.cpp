@@ -103,6 +103,10 @@ Fill *Fill::new_from_type(const InfillPattern type)
         return new FillCustom();
     case ipCat:
         return new FillCat();
+    case ipCatMirrored:
+        return new FillCatMirrored();
+    case ipCatTiled:
+        return new FillCatTiled();
     default:
         throw Slic3r::InvalidArgument("unknown type");
     }

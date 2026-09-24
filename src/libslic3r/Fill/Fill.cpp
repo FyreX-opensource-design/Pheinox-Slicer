@@ -246,6 +246,10 @@ static const char *dbg_pattern(InfillPattern p)
         return "Custom";
     case ipCat:
         return "Cat";
+    case ipCatMirrored:
+        return "CatMirrored";
+    case ipCatTiled:
+        return "CatTiled";
     default:
         return "UNKNOWN";
     }
@@ -2382,6 +2386,8 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipZigZag:
         case ipCustom:
         case ipCat:
+        case ipCatMirrored:
+        case ipCatTiled:
             break;
         }
 

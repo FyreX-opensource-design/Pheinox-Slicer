@@ -204,7 +204,9 @@ static const t_config_enum_values s_keys_map_InfillPattern{{"rectilinear", ipRec
                                                            {"lightning", ipLightning},
                                                            {"zigzag", ipZigZag},
                                                            {"custom", ipCustom},
-                                                           {"cat", ipCat}};
+                                                           {"cat", ipCat},
+                                                           {"catmirrored", ipCatMirrored},
+                                                           {"cattiled", ipCatTiled}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
 static const t_config_enum_values s_keys_map_IroningType{{"top", int(IroningType::TopSurfaces)},
@@ -2202,7 +2204,9 @@ void PrintConfigDef::init_fff_params()
         {"lightning", L("Lightning")},
         {"zigzag", L("Zig Zag")},
         {"custom", L("Custom")},
-        {"cat", L("Cat")}});
+        {"cat", L("Cat")},
+        {"catmirrored", L("Cat mirrored")},
+        {"cattiled", L("Cat tiled")}});
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipStars));
 
     def = this->add("custom_infill_source", coEnum);
