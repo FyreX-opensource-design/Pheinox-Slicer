@@ -579,6 +579,7 @@ static std::vector<std::string> s_Preset_print_options{
     "seam_gap_distance",
     "external_perimeters_first",
     "outer_wall_layer_height",
+    "conical_slicing",
     "outer_wall_slope_antialiasing",
     "zaa_enabled",
     "zaa_min_height",

@@ -4,11 +4,16 @@
 #include "../GCode.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
+#include "../Geometry/ArcWelder.hpp"
+
 #include "../ClipperUtils.hpp"
 #include "../Layer.hpp"
+#include "../Print.hpp"
 #include "../Surface.hpp"
 
 namespace Slic3r
@@ -405,6 +410,102 @@ std::string GCodeGenerator::emit_feature_temperature(const int temperature, cons
     return out;
 }
 
+GCodeGenerator::ConicalBand GCodeGenerator::conical_band(const Point &) const
+{
+    ConicalBand band;
+    if (m_layer == nullptr || m_layer->object() == nullptr || m_config.spiral_vase.value)
+        return band;
+
+    const PrintObject *object = m_layer->object();
+    const ConicalSlicing mode = object->conical_slicing_mode();
+    if (mode == ConicalSlicing::Off)
+        return band;
+
+    // Walls sit outside the infill surfaces, so this must not require the point to
+    // fall inside a slice. Skirt and brim are filtered by the caller.
+    double step = m_layer->height;
+    for (const LayerRegion *region : m_layer->regions())
+    {
+        if (region == nullptr)
+            continue;
+        const double wall_height = region->region().config().outer_wall_layer_height.value;
+        if (wall_height > 0.)
+        {
+            step = wall_height;
+            break;
+        }
+    }
+
+    // Axis is the object's centered origin, the same origin the mesh warp used.
+    // z_shift is the mesh sink plus the gap from the nozzle height down to the slice plane.
+    band.axis = Vec2d::Zero();
+    band.radius = object->conical_radius_mm();
+    band.z_shift = object->conical_z_shift_mm() + (m_layer->slice_z - m_layer->print_z);
+    band.z_step = std::max(0.05, 2. * step);
+    band.sign = mode == ConicalSlicing::Inward ? 1. : -1.;
+    band.active = true;
+    return band;
+}
+
+double GCodeGenerator::conical_dz(const ConicalBand &band, const Point &point)
+{
+    if (!band.active)
+        return 0.;
+    const Vec2d at(unscale<double>(point.x()), unscale<double>(point.y()));
+    // Radius in the original model. Slices were scaled back by cos(45°) after the warp.
+    const double r = (at - band.axis).norm();
+    // Inverse of the slice warp, so this layer lands on the original surface.
+    // Outward warp was z' = z + r - z_shift. Inward warp was z' = z + (R - r) - z_shift.
+    if (band.sign < 0.)
+        return -r + band.z_shift;
+    return r - band.radius + band.z_shift;
+}
+
+double GCodeGenerator::conical_z_offset_mm(const Point &point) const
+{
+    return conical_dz(this->conical_band(point), point);
+}
+
+bool GCodeGenerator::rewrite_conical_path(const Geometry::ArcWelder::Path &in, const double height_mm,
+                                          Geometry::ArcWelder::Path &out) const
+{
+    if (in.size() < 2 || height_mm <= 1e-6)
+        return false;
+    const ConicalBand band = this->conical_band(in.front().point);
+    if (!band.active)
+        return false;
+
+    out.clear();
+    out.reserve(in.size());
+    Geometry::ArcWelder::Segment first = in.front();
+    first.radius = 0.f;
+    first.height_fraction += float(conical_dz(band, first.point) / height_mm);
+    out.push_back(first);
+
+    for (size_t i = 1; i < in.size(); ++i)
+    {
+        const Geometry::ArcWelder::Segment &src_prev = in[i - 1];
+        const Geometry::ArcWelder::Segment &src = in[i];
+        const Vec2d from(double(src_prev.point.x()), double(src_prev.point.y()));
+        const Vec2d to(double(src.point.x()), double(src.point.y()));
+        const double len_mm = unscale<double>((to - from).norm());
+        // At 45°, Z changes at most as fast as XY, so a piece this long changes Z by at most z_step.
+        const int pieces = std::max(1, int(std::ceil(len_mm / band.z_step)));
+        for (int k = 1; k <= pieces; ++k)
+        {
+            const double u = double(k) / double(pieces);
+            const Vec2d at = from + (to - from) * u;
+            Geometry::ArcWelder::Segment sample = src;
+            sample.point = Point(coord_t(std::lround(at.x())), coord_t(std::lround(at.y())));
+            sample.radius = 0.f;
+            const float hf = float(src_prev.height_fraction + (src.height_fraction - src_prev.height_fraction) * u);
+            sample.height_fraction = hf + float(conical_dz(band, sample.point) / height_mm);
+            out.push_back(sample);
+        }
+    }
+    return out.size() >= 2;
+}
+
 std::string GCodeGenerator::feature_transition(const GCodeExtrusionRole new_role)
 {
     if (m_writer.extruder() == nullptr)
@@ -426,6 +527,346 @@ std::string GCodeGenerator::feature_transition(const GCodeExtrusionRole new_role
     append_user_gcode(out, this->feature_custom_gcode(next, true));
     m_feature_index = next;
     return out;
+}
+
+void GCodeGenerator::ensure_conical_band_grid()
+{
+    if (m_conical_grid.ready)
+        return;
+    const double first_h = std::max(0.05, m_config.first_layer_height.value);
+    double lh = m_config.layer_height.value;
+    if (m_layer != nullptr && m_layer->object() != nullptr)
+        lh = m_layer->object()->config().layer_height.value;
+    lh = std::max(0.05, lh);
+    // The first slice is the first layer plus one normal layer. Later slices are two normal layers.
+    m_conical_grid.layer_height = lh;
+    m_conical_grid.first_top = m_config.z_offset.value + first_h + lh;
+    m_conical_grid.span = 2. * lh;
+    m_conical_grid.ready = true;
+}
+
+int GCodeGenerator::conical_band_index(double z) const
+{
+    if (!m_conical_grid.ready || z <= m_conical_grid.first_top + 1e-4)
+        return 0;
+    return 1 + int(std::floor((z - m_conical_grid.first_top - 1e-4) / m_conical_grid.span));
+}
+
+void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
+                                             const Geometry::ArcWelder::Path &path, const std::string_view description,
+                                             const double speed, const EmitModifiers &emit_modifiers)
+{
+    if (path.size() < 2 || m_writer.extruder() == nullptr)
+        return;
+    this->ensure_conical_band_grid();
+
+    const double bead = attribs.height > 1e-6 ? double(attribs.height) : double(m_last_height);
+    Geometry::ArcWelder::Path zpath = path;
+    for (Geometry::ArcWelder::Segment &seg : zpath)
+    {
+        const double z = double(m_last_layer_z) + (double(seg.height_fraction) - 1.) * bead;
+        seg.height_fraction = float(z);
+        seg.radius = 0.f;
+    }
+
+    auto band_top = [this](int band) {
+        if (band <= 0)
+            return m_conical_grid.first_top;
+        return m_conical_grid.first_top + band * m_conical_grid.span;
+    };
+    auto push_unique = [](Geometry::ArcWelder::Path &dst, const Geometry::ArcWelder::Segment &seg)
+    {
+        if (!dst.empty() && dst.back().point == seg.point &&
+            std::abs(dst.back().height_fraction - seg.height_fraction) < 1e-4f)
+            return;
+        dst.push_back(seg);
+    };
+    auto enqueue = [&](int band, Geometry::ArcWelder::Path piece)
+    {
+        if (piece.size() < 2)
+            return;
+        ConicalQueuedExtrusion item;
+        item.band = band;
+        item.object = m_layer ? m_layer->object() : nullptr;
+        item.region = m_conical_region;
+        item.layer = m_layer;
+        item.instance_idx = m_current_instance.instance_idx;
+        item.extruder_id = m_writer.extruder()->id();
+        item.origin = m_origin;
+        item.attributes = attribs;
+        item.path = std::move(piece);
+        item.speed = speed;
+        item.description = std::string(description);
+        item.emit_modifiers = emit_modifiers;
+        m_conical_queue.push_back(std::move(item));
+    };
+
+    Geometry::ArcWelder::Path current;
+    int band = conical_band_index(zpath.front().height_fraction);
+    current.push_back(zpath.front());
+    for (size_t i = 1; i < zpath.size(); ++i)
+    {
+        const Geometry::ArcWelder::Segment &src = zpath[i];
+        const double z1 = src.height_fraction;
+        const int dest = conical_band_index(z1);
+        if (dest == band)
+        {
+            push_unique(current, src);
+            continue;
+        }
+
+        Geometry::ArcWelder::Segment from = current.back();
+        double z_from = from.height_fraction;
+        int guard = 0;
+        while (band != dest && guard++ < 32)
+        {
+            const bool climbing = dest > band;
+            const double edge = climbing ? band_top(band) : band_top(band - 1);
+            const double dz = z1 - z_from;
+            double u = std::abs(dz) < 1e-9 ? 1. : (edge - z_from) / dz;
+            u = std::clamp(u, 0., 1.);
+            Geometry::ArcWelder::Segment mid = src;
+            const double x = double(from.point.x()) + (double(src.point.x()) - double(from.point.x())) * u;
+            const double y = double(from.point.y()) + (double(src.point.y()) - double(from.point.y())) * u;
+            mid.point = Point(coord_t(std::lround(x)), coord_t(std::lround(y)));
+            mid.height_fraction = float(edge);
+            mid.radius = 0.f;
+            push_unique(current, mid);
+            enqueue(band, std::move(current));
+            current.clear();
+            current.push_back(mid);
+            band += climbing ? 1 : -1;
+            z_from = edge;
+            from = mid;
+        }
+        push_unique(current, src);
+        band = dest;
+    }
+    enqueue(band, std::move(current));
+}
+
+std::string GCodeGenerator::flush_conical_bands(const Print &print)
+{
+    if (m_conical_queue.empty())
+        return {};
+
+    std::stable_sort(m_conical_queue.begin(), m_conical_queue.end(),
+                     [](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
+                     { return a.band < b.band; });
+
+    std::string gcode;
+    gcode.reserve(m_conical_queue.size() * 64);
+    int current_band = std::numeric_limits<int>::min();
+    const PrintObject *applied_object = nullptr;
+    const PrintRegion *applied_region = nullptr;
+    const double nominal_layer = m_conical_grid.ready ? m_conical_grid.layer_height : m_config.layer_height.value;
+
+    auto begin_band = [&](int band, double zmin, double zmax)
+    {
+        double span = zmax - zmin;
+        if (span < 1e-3)
+            span = std::max(0.05, nominal_layer);
+        m_last_layer_z = float(zmax);
+        m_last_height = float(span);
+        m_max_layer_z = std::max(m_max_layer_z, m_last_layer_z);
+
+        if (!print.config().before_layer_gcode.value.empty() && band > 0)
+        {
+            DynamicConfig config;
+            config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index + 1));
+            config.set_key_value("layer_z", new ConfigOptionFloat(zmax));
+            config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
+            gcode += this->placeholder_parser_process("before_layer_gcode", print.config().before_layer_gcode.value,
+                                                      m_writer.extruder()->id(), &config) +
+                     "\n";
+        }
+
+        gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + ":" +
+                 std::to_string(m_layer_index + 2) + "\n";
+        gcode += std::string(";Z:") + float_to_string_decimal_point(zmax) + "\n";
+        const double rounded_height = std::round(span * 10000.0) / 10000.0;
+        gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) +
+                 float_to_string_decimal_point(rounded_height) + "\n";
+        const unsigned int progress_total = std::max(m_layer_count, (unsigned int) (m_layer_index + 2));
+        gcode += m_writer.update_progress(++m_layer_index, progress_total);
+
+        if (!print.config().layer_gcode.value.empty() && band > 0)
+        {
+            DynamicConfig config;
+            config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
+            config.set_key_value("layer_z", new ConfigOptionFloat(zmax));
+            config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
+            gcode += this->placeholder_parser_process("layer_gcode", print.config().layer_gcode.value,
+                                                      m_writer.extruder()->id(), &config) +
+                     "\n";
+        }
+
+        if (band > 0 && !m_second_layer_things_done)
+        {
+            for (const Extruder &extruder : m_writer.extruders())
+            {
+                if (print.config().single_extruder_multi_material.value || m_ooze_prevention.enable)
+                {
+                    if (extruder.id() != m_writer.extruder()->id())
+                        continue;
+                }
+                const int temperature = print.config().temperature.get_at(extruder.id());
+                if (temperature > 0 && temperature != print.config().first_layer_temperature.get_at(extruder.id()))
+                    gcode += m_writer.set_temperature(temperature, false, extruder.id());
+            }
+            const int num_extruders = int(print.config().nozzle_diameter.values.size());
+            const int bed_temperature_extruder = print.config().bed_temperature_extruder;
+            const bool use_first_extruder = bed_temperature_extruder <= 0 || bed_temperature_extruder > num_extruders;
+            const int bed_ext_id = use_first_extruder ? int(m_writer.extruder()->id()) : bed_temperature_extruder - 1;
+            const int bed_temperature = print.config().bed_temperature.get_at(bed_ext_id);
+            if (bed_temperature > 0 && bed_temperature != print.config().first_layer_bed_temperature.get_at(bed_ext_id))
+                gcode += m_writer.set_bed_temperature(bed_temperature);
+            m_second_layer_things_done = true;
+        }
+        m_current_manual_fan_speed.reset();
+        applied_object = nullptr;
+        applied_region = nullptr;
+    };
+
+    size_t index = 0;
+    while (index < m_conical_queue.size())
+    {
+        const int band = m_conical_queue[index].band;
+        size_t end = index;
+        double zmin = std::numeric_limits<double>::infinity();
+        double zmax = -std::numeric_limits<double>::infinity();
+        while (end < m_conical_queue.size() && m_conical_queue[end].band == band)
+        {
+            for (const Geometry::ArcWelder::Segment &seg : m_conical_queue[end].path)
+            {
+                const double z = seg.height_fraction;
+                zmin = std::min(zmin, z);
+                zmax = std::max(zmax, z);
+            }
+            ++end;
+        }
+        if (band != current_band)
+        {
+            begin_band(band, zmin, zmax);
+            current_band = band;
+        }
+        const double layer_z = m_last_layer_z;
+        const double layer_h = std::max(1e-4, double(m_last_height));
+
+        for (size_t i = index; i < end; ++i)
+        {
+            ConicalQueuedExtrusion &item = m_conical_queue[i];
+            if (item.object != nullptr)
+            {
+                const auto layers = item.object->layers();
+                if (band == 0 && !layers.empty())
+                    m_layer = layers.front();
+                else if (item.layer != nullptr && item.layer->id() > 0)
+                    m_layer = item.layer;
+                else if (!layers.empty() && layers.size() > 1)
+                    m_layer = layers[1];
+                else
+                    m_layer = item.layer;
+            }
+            m_object_layer_over_raft = false;
+            if (item.object != applied_object || item.region != applied_region)
+            {
+                if (item.object != nullptr)
+                    m_config.apply(item.object->config(), true);
+                if (item.region != nullptr)
+                    m_config.apply(item.region->config());
+                applied_object = item.object;
+                applied_region = item.region;
+            }
+            if (m_writer.extruder() == nullptr || m_writer.extruder()->id() != item.extruder_id)
+                gcode += this->set_extruder(item.extruder_id, layer_z);
+            if (m_origin != item.origin)
+                this->set_origin(item.origin);
+            if (item.object != nullptr)
+                m_current_instance = {item.object, item.instance_idx};
+
+            for (Geometry::ArcWelder::Segment &seg : item.path)
+            {
+                const double z = seg.height_fraction;
+                seg.height_fraction = float(1. + (z - layer_z) / layer_h);
+            }
+
+            struct Guard
+            {
+                bool &flag;
+                explicit Guard(bool &flag) : flag(flag) { flag = true; }
+                ~Guard() { flag = false; }
+            } guard{m_conical_rewrite};
+            gcode += this->_extrude(item.attributes, item.path, item.description, item.speed, item.emit_modifiers);
+        }
+        index = end;
+    }
+
+    this->set_origin(Vec2d::Zero());
+    m_conical_queue.clear();
+    m_conical_grid = {};
+    return gcode;
+}
+
+GCodeGenerator::ConicalEmissionSnapshot GCodeGenerator::capture_conical_emission_state() const
+{
+    ConicalEmissionSnapshot snap;
+    snap.axis = m_writer.axis_state();
+    snap.config = m_config;
+    snap.last_position = last_position;
+    snap.origin = m_origin;
+    snap.layer = m_layer;
+    snap.object_layer_over_raft = m_object_layer_over_raft;
+    snap.last_height = m_last_height;
+    snap.last_layer_z = m_last_layer_z;
+    snap.max_layer_z = m_max_layer_z;
+    snap.last_width = m_last_width;
+    snap.last_region_area = m_last_region_area;
+    snap.last_interlocking_flow = m_last_interlocking_flow_multiplier;
+    snap.feature_index = m_feature_index;
+    snap.feature_temp_locked = m_feature_temp_locked;
+    snap.feature_commanded_temp = m_feature_commanded_temp;
+    snap.feature_temp_baseline = m_feature_temp_baseline;
+    snap.last_processor_role = m_last_processor_extrusion_role;
+    snap.last_extrusion_role = m_last_extrusion_role;
+    snap.manual_fan = m_current_manual_fan_speed;
+    snap.moved_to_first = m_moved_to_first_layer_point;
+    snap.current_instance = m_current_instance;
+    snap.wipe_path = m_wipe.path();
+    snap.pending_gcode = m_pending_pre_extrusion_gcode;
+    snap.region = m_conical_region;
+    return snap;
+}
+
+void GCodeGenerator::restore_conical_emission_state(const ConicalEmissionSnapshot &snapshot)
+{
+    m_writer.restore_axis_state(snapshot.axis);
+    m_config = snapshot.config;
+    last_position = snapshot.last_position;
+    m_origin = snapshot.origin;
+    m_layer = snapshot.layer;
+    m_object_layer_over_raft = snapshot.object_layer_over_raft;
+    m_last_height = snapshot.last_height;
+    m_last_layer_z = snapshot.last_layer_z;
+    m_max_layer_z = snapshot.max_layer_z;
+    m_last_width = snapshot.last_width;
+    m_last_region_area = snapshot.last_region_area;
+    m_last_interlocking_flow_multiplier = snapshot.last_interlocking_flow;
+    m_feature_index = snapshot.feature_index;
+    m_feature_temp_locked = snapshot.feature_temp_locked;
+    m_feature_commanded_temp = snapshot.feature_commanded_temp;
+    m_feature_temp_baseline = snapshot.feature_temp_baseline;
+    m_last_processor_extrusion_role = snapshot.last_processor_role;
+    m_last_extrusion_role = snapshot.last_extrusion_role;
+    m_current_manual_fan_speed = snapshot.manual_fan;
+    m_moved_to_first_layer_point = snapshot.moved_to_first;
+    m_current_instance = snapshot.current_instance;
+    if (snapshot.wipe_path.size() > 1)
+        m_wipe.set_path(snapshot.wipe_path);
+    else
+        m_wipe.reset_path();
+    m_pending_pre_extrusion_gcode = snapshot.pending_gcode;
+    m_conical_region = snapshot.region;
 }
 
 } // namespace Slic3r

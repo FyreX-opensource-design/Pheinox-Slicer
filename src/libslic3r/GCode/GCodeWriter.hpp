@@ -201,6 +201,79 @@ private:
 
     std::string _retract(double length, double restart_extra, const std::string_view comment);
     std::string set_acceleration_internal(Acceleration type, unsigned int acceleration);
+
+public:
+    // Position, acceleration bookkeeping, and filament axis. Used to run a dry extrusion pass
+    // and then put the writer back where the emitted G-code actually is.
+    struct AxisState
+    {
+        struct Filament
+        {
+            unsigned id{0};
+            double e{0.};
+            double absolute_e{0.};
+            double retracted{0.};
+            double restart_extra{0.};
+        };
+        Vec3d pos{Vec3d::Zero()};
+        double travel_override{0.};
+        unsigned int print_accel{0};
+        unsigned int travel_accel{0};
+        unsigned extruder_id{0};
+        bool has_extruder{false};
+        std::vector<Filament> filaments;
+    };
+
+    AxisState axis_state() const
+    {
+        AxisState state;
+        state.pos = m_pos;
+        state.travel_override = m_travel_speed_override;
+        state.print_accel = m_last_acceleration;
+        state.travel_accel = m_last_travel_acceleration;
+        state.has_extruder = m_extruder != nullptr;
+        state.extruder_id = m_extruder ? m_extruder->id() : 0;
+        state.filaments.reserve(m_extruders.size());
+        for (const Extruder &extruder : m_extruders)
+        {
+            state.filaments.push_back(
+                {extruder.id(), extruder.position(), extruder.absolute_position(), extruder.retracted(),
+                 extruder.restart_extra()});
+        }
+        return state;
+    }
+
+    void restore_axis_state(const AxisState &state)
+    {
+        m_pos = state.pos;
+        m_travel_speed_override = state.travel_override;
+        m_last_acceleration = state.print_accel;
+        m_last_travel_acceleration = state.travel_accel;
+        for (Extruder &extruder : m_extruders)
+        {
+            for (const AxisState::Filament &filament : state.filaments)
+            {
+                if (filament.id != extruder.id())
+                    continue;
+                extruder.set_position(filament.e);
+                extruder.set_absolute_position(filament.absolute_e);
+                extruder.set_retracted(filament.retracted, filament.restart_extra);
+                break;
+            }
+        }
+        m_extruder = nullptr;
+        if (state.has_extruder)
+        {
+            for (Extruder &extruder : m_extruders)
+            {
+                if (extruder.id() == state.extruder_id)
+                {
+                    m_extruder = &extruder;
+                    break;
+                }
+            }
+        }
+    }
 };
 
 // preFlight: Remove trailing standalone G1-F-only lines from gcode, then append new_line.

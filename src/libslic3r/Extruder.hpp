@@ -58,6 +58,7 @@ public:
     // Getters for the PlaceholderParser.
     // Get current extruder position. Only applicable with absolute extruder addressing.
     double position() const { return m_E; }
+    double absolute_position() const { return m_absolute_E; }
     // Get current retraction value. Only non-negative values.
     double retracted() const { return m_retracted; }
     // Get extra retraction planned after
@@ -65,6 +66,7 @@ public:
     // Setters for the PlaceholderParser.
     // Set current extruder position. Only applicable with absolute extruder addressing.
     void set_position(double e) { m_E = e; }
+    void set_absolute_position(double e) { m_absolute_E = e; }
     // Sets current retraction value & restart extra filament amount if retracted > 0.
     void set_retracted(double retracted, double restart_extra);
 

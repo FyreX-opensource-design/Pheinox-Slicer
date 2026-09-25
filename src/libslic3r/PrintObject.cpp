@@ -1023,7 +1023,8 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                 steps.emplace_back(posSlice);
             steps.emplace_back(posPerimeters);
         }
-        else if (opt_key == "layer_height" || opt_key == "mmu_segmented_region_max_width" ||
+        else if (opt_key == "layer_height" || opt_key == "conical_slicing" ||
+                 opt_key == "mmu_segmented_region_max_width" ||
                  opt_key == "mmu_segmented_region_interlocking_depth" || opt_key == "raft_layers" ||
                  opt_key == "raft_contact_distance" || opt_key == "slice_closing_radius" || opt_key == "slicing_mode" ||
                  opt_key == "interlocking_beam" || opt_key == "interlocking_orientation" ||

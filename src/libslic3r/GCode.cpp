@@ -2145,7 +2145,30 @@ void GCodeGenerator::process_layers(const Print &print, const ToolOrdering &tool
                 if (idx < 5 || idx % 20 == 0 || idx == layers_to_print.size() - 1)
                     fprintf(stderr, "[TIMELINE] L%03zu cooling  ENTER  @ %7.1fms\n", idx, elapsed());
             auto tc0 = std::chrono::steady_clock::now();
-            auto result = cooling_buffer->process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+            std::string result;
+            const std::string layer_tag = ";LAYER_CHANGE";
+            std::vector<size_t> band_cuts;
+            if (in.cooling_buffer_flush)
+            {
+                for (size_t at = 0; (at = in.gcode.find(layer_tag, at)) != std::string::npos; at += layer_tag.size())
+                    band_cuts.push_back(at);
+            }
+            if (band_cuts.size() <= 1)
+            {
+                result = cooling_buffer->process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+            }
+            else
+            {
+                // Stacked conical slices share one generator result. Cool each slice on its own
+                // so a tall part is not treated as a single layer.
+                for (size_t band = 0; band < band_cuts.size(); ++band)
+                {
+                    const size_t begin = band == 0 ? 0 : band_cuts[band];
+                    const size_t end = band + 1 < band_cuts.size() ? band_cuts[band + 1] : in.gcode.size();
+                    result += cooling_buffer->process_layer(in.gcode.substr(begin, end - begin), in.layer_id + band,
+                                                            true);
+                }
+            }
             t_cooling.add(tc0, std::chrono::steady_clock::now());
             if constexpr (PERF_TIMING)
                 if (idx < 5 || idx % 20 == 0 || idx == layers_to_print.size() - 1)
@@ -3231,9 +3254,21 @@ LayerResult GCodeGenerator::process_layer(
     const Layer &layer = (object_layer != nullptr) ? *object_layer : *support_layer;
     LayerResult result{{}, layer.id(), false, last_layer, false};
 
+    // Conical object paths are queued across warped slices and emitted once, on the last
+    // collected layer. That layer is often an empty cone slice, and these early returns
+    // used to drop the queue after the skirt had already been written.
+    auto flush_conical_if_last = [&]()
+    {
+        if (last_layer && !m_conical_queue.empty())
+            result.gcode += this->flush_conical_bands(print);
+    };
+
     if (layer_tools.extruders.empty())
+    {
         // Nothing to extrude.
+        flush_conical_if_last();
         return result;
+    }
 
     // Extract 1st object_layer and support_layer of this set of layers with an equal print_z.
     coordf_t print_z = layer.print_z + m_config.z_offset.value;
@@ -3286,12 +3321,14 @@ LayerResult GCodeGenerator::process_layer(
 
     if (extrusions.empty())
     {
+        flush_conical_if_last();
         return result;
     }
 
     const auto optional_first_segment{GCode::ExtrusionOrder::get_first_point(extrusions)};
     if (!optional_first_segment)
     {
+        flush_conical_if_last();
         return result;
     }
     const Geometry::ArcWelder::Segment &first_segment{*optional_first_segment};
@@ -3299,6 +3336,93 @@ LayerResult GCodeGenerator::process_layer(
         to_3d(first_segment.point, scaled(print_z + (first_segment.height_fraction - 1.0) * height))};
     const PrintInstance *first_instance{get_first_instance(extrusions, instances_to_print)};
     m_label_objects.update(first_instance);
+
+    // Wipe-tower bookkeeping is set on ordinary layers even when the tower is off. Gating on
+    // it dropped every other conical slice back into the full-height slope.
+    bool any_conical = false;
+    bool any_flat = false;
+    for (const ObjectLayerToPrint &layer_to_print : layers)
+    {
+        const PrintObject *printed = layer_to_print.object();
+        if (printed == nullptr)
+            continue;
+        if (printed->conical_slicing_mode() == ConicalSlicing::Off)
+            any_flat = true;
+        else
+            any_conical = true;
+    }
+    const bool conical_stack = any_conical && !any_flat && !m_config.spiral_vase.value;
+    bool has_bed_adhesion = false;
+    if (conical_stack)
+    {
+        for (const ExtruderExtrusions &extruder_extrusions : extrusions)
+        {
+            if (!extruder_extrusions.skirt.empty() || !extruder_extrusions.brim.empty())
+                has_bed_adhesion = true;
+        }
+    }
+
+    auto extrude_object_copies = [&](ExtruderExtrusions &extruder_extrusions, std::string &out, const bool mark_purge)
+    {
+        if (!extruder_extrusions.overriden_extrusions.empty())
+        {
+            const size_t before_purge = out.size();
+            for (std::size_t i{0}; i < instances_to_print.size(); ++i)
+            {
+                const InstanceToPrint &instance{instances_to_print[i]};
+                using GCode::ExtrusionOrder::OverridenExtrusions;
+                OverridenExtrusions &overriden_extrusions{extruder_extrusions.overriden_extrusions[i]};
+                if (is_empty(overriden_extrusions.slices_extrusions))
+                    continue;
+                this->initialize_instance(instance, layers[instance.object_layer_to_print_id], i == 0);
+                out += this->extrude_slices(instance, layers[instance.object_layer_to_print_id],
+                                            overriden_extrusions.slices_extrusions);
+            }
+            if (mark_purge && before_purge < out.size())
+                out += "; PURGING FINISHED\n";
+        }
+
+        for (std::size_t i{0}; i < instances_to_print.size(); ++i)
+        {
+            const InstanceToPrint &instance{instances_to_print[i]};
+            using GCode::ExtrusionOrder::SupportPath;
+            const std::vector<SupportPath> &support_extrusions{
+                extruder_extrusions.normal_extrusions[i].support_extrusions};
+            const ObjectLayerToPrint &layer_to_print{layers[instance.object_layer_to_print_id]};
+            std::vector<SliceExtrusions> &slices_extrusions{extruder_extrusions.normal_extrusions[i].slices_extrusions};
+
+            if (support_extrusions.empty() && is_empty(slices_extrusions))
+                continue;
+            this->initialize_instance(instance, layers[instance.object_layer_to_print_id], i == 0);
+
+            if (!support_extrusions.empty())
+            {
+                m_layer = layer_to_print.support_layer;
+                m_object_layer_over_raft = false;
+                out += this->extrude_support(support_extrusions);
+            }
+
+            out += this->extrude_slices(instance, layer_to_print, slices_extrusions);
+        }
+    };
+
+    if (conical_stack && !has_bed_adhesion)
+    {
+        // Keep the writer where the last emitted move left it. These warped slices are only
+        // collected; the stacked bands are written on the object's last layer.
+        const ConicalEmissionSnapshot snapshot{this->capture_conical_emission_state()};
+        m_conical_defer = true;
+        m_layer = &layer;
+        m_last_layer_z = static_cast<float>(print_z);
+        m_last_height = height;
+        std::string discarded;
+        for (ExtruderExtrusions &extruder_extrusions : extrusions)
+            extrude_object_copies(extruder_extrusions, discarded, false);
+        m_conical_defer = false;
+        this->restore_conical_emission_state(snapshot);
+        result.gcode = last_layer ? this->flush_conical_bands(print) : std::string{};
+        return result;
+    }
 
     std::string gcode;
     gcode.reserve(16384);
@@ -3550,53 +3674,20 @@ LayerResult GCodeGenerator::process_layer(
 
         m_label_objects.update(first_instance);
 
-        if (!extruder_extrusions.overriden_extrusions.empty())
+        const bool defer_objects = conical_stack && has_bed_adhesion;
+        const size_t conical_mark = gcode.size();
+        const ConicalEmissionSnapshot conical_snapshot{defer_objects ? this->capture_conical_emission_state()
+                                                                     : ConicalEmissionSnapshot{}};
+        if (defer_objects)
+            m_conical_defer = true;
+
+        extrude_object_copies(extruder_extrusions, gcode, !defer_objects);
+
+        if (defer_objects)
         {
-            // Extrude wipes.
-            size_t gcode_size_old = gcode.size();
-            for (std::size_t i{0}; i < instances_to_print.size(); ++i)
-            {
-                const InstanceToPrint &instance{instances_to_print[i]};
-                using GCode::ExtrusionOrder::OverridenExtrusions;
-                OverridenExtrusions &overriden_extrusions{extruder_extrusions.overriden_extrusions[i]};
-                if (is_empty(overriden_extrusions.slices_extrusions))
-                {
-                    continue;
-                }
-                this->initialize_instance(instance, layers[instance.object_layer_to_print_id], i == 0);
-                gcode += this->extrude_slices(instance, layers[instance.object_layer_to_print_id],
-                                              overriden_extrusions.slices_extrusions);
-            }
-            if (gcode_size_old < gcode.size())
-            {
-                gcode += "; PURGING FINISHED\n";
-            }
-        }
-
-        // Extrude normal extrusions.
-        for (std::size_t i{0}; i < instances_to_print.size(); ++i)
-        {
-            const InstanceToPrint &instance{instances_to_print[i]};
-            using GCode::ExtrusionOrder::SupportPath;
-            const std::vector<SupportPath> &support_extrusions{
-                extruder_extrusions.normal_extrusions[i].support_extrusions};
-            const ObjectLayerToPrint &layer_to_print{layers[instance.object_layer_to_print_id]};
-            std::vector<SliceExtrusions> &slices_extrusions{extruder_extrusions.normal_extrusions[i].slices_extrusions};
-
-            if (support_extrusions.empty() && is_empty(slices_extrusions))
-            {
-                continue;
-            }
-            this->initialize_instance(instance, layers[instance.object_layer_to_print_id], i == 0);
-
-            if (!support_extrusions.empty())
-            {
-                m_layer = layer_to_print.support_layer;
-                m_object_layer_over_raft = false;
-                gcode += this->extrude_support(support_extrusions);
-            }
-
-            gcode += this->extrude_slices(instance, layer_to_print, slices_extrusions);
+            m_conical_defer = false;
+            gcode.resize(conical_mark);
+            this->restore_conical_emission_state(conical_snapshot);
         }
         this->set_origin(0.0, 0.0);
     }
@@ -3617,6 +3708,9 @@ LayerResult GCodeGenerator::process_layer(
         s_pl_extrude.reset();
         s_pl_count = 0;
     }
+
+    if (last_layer && !m_conical_queue.empty())
+        gcode += this->flush_conical_bands(print);
 
     result.gcode = std::move(gcode);
     result.cooling_buffer_flush = object_layer || raft_layer || last_layer;
@@ -3735,6 +3829,29 @@ std::string GCodeGenerator::extrude_interlocking_gap_fills(const LayerRegion *la
             // At 100% strength: 1.0 + 0.5 = 1.5x flow for gap fills
             double flow_multiplier = 1.5 * overlap_flow_multiplier;
 
+            if (m_conical_defer)
+            {
+                Geometry::ArcWelder::Path queued;
+                queued.reserve(points.size());
+                for (const Point &pt : points)
+                {
+                    Geometry::ArcWelder::Segment seg;
+                    seg.point = pt;
+                    seg.height_fraction = 1.f;
+                    seg.e_fraction = 1.f;
+                    queued.push_back(seg);
+                }
+                ExtrusionAttributes attr(ExtrusionRole::InterlockingPerimeter);
+                attr.height = base_height;
+                attr.width = base_width;
+                attr.mm3_per_mm = extrusion_path.mm3_per_mm();
+                const double speed_mm_s = flow_multiplier > 1e-6 ? m_config.perimeter_speed.value / flow_multiplier
+                                                                : m_config.perimeter_speed.value;
+                this->queue_conical_extrusion(attr, queued, "interlocking gap fill", speed_mm_s,
+                                              EmitModifiers::create_with_disabled_emits());
+                continue;
+            }
+
             // Scale width and height by sqrt(flow_multiplier) since area scales with flow
             double scale_factor = std::sqrt(flow_multiplier);
             float scaled_width = base_width * scale_factor;
@@ -3775,7 +3892,11 @@ std::string GCodeGenerator::extrude_interlocking_gap_fills(const LayerRegion *la
 
             // Travel to first point
             Vec2d first_pt = this->point_to_gcode(points.front());
-            gcode += m_writer.travel_to_xy(first_pt, "move to gap fill start");
+            const double gap_z = this->m_last_layer_z + this->conical_z_offset_mm(points.front());
+            if (std::abs(gap_z - this->m_last_layer_z) > 1e-4)
+                gcode += m_writer.travel_to_xyz(Vec3d(first_pt.x(), first_pt.y(), gap_z), "move to gap fill start");
+            else
+                gcode += m_writer.travel_to_xy(first_pt, "move to gap fill start");
             this->last_position = points.front();
 
             // Unretract before extrusion
@@ -3790,7 +3911,11 @@ std::string GCodeGenerator::extrude_interlocking_gap_fills(const LayerRegion *la
                 double e = e_per_mm * segment_length;
 
                 // Emit G1 with E and F (speed) - use extrude_to_xy then append F
-                std::string move = m_writer.extrude_to_xy(to_pt, e, "interlocking gap fill");
+                const double gap_dz = this->conical_z_offset_mm(points[i]);
+                std::string move = std::abs(gap_dz) > 1e-4
+                                       ? m_writer.extrude_to_xyz(Vec3d(to_pt.x(), to_pt.y(), this->m_last_layer_z + gap_dz),
+                                                                 e, "interlocking gap fill")
+                                       : m_writer.extrude_to_xy(to_pt, e, "interlocking gap fill");
                 // Insert F value before the comment (or at end if no comment)
                 size_t comment_pos = move.find(';');
                 if (comment_pos != std::string::npos)
@@ -4132,6 +4257,7 @@ std::string GCodeGenerator::extrude_infill_ranges(const std::vector<InfillRange>
         if (!infill_range.items.empty())
         {
             this->m_config.apply(infill_range.region->config());
+            m_conical_region = infill_range.region;
             for (const GCode::SmoothPath &path : infill_range.items)
             {
                 gcode += this->extrude_smooth_path(path, false, comment, -1.0);
@@ -4139,6 +4265,7 @@ std::string GCodeGenerator::extrude_infill_ranges(const std::vector<InfillRange>
         }
     }
 
+    m_conical_region = nullptr;
     return gcode;
 }
 
@@ -5648,6 +5775,7 @@ std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
     if (!perimeters.empty())
     {
         m_config.apply(region.config());
+        m_conical_region = &region;
     }
 
     // preFlight: nip/tuck needs >=2 regular walls so the external has an adjacent inner to notch. Two configs
@@ -5731,6 +5859,7 @@ std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
             }
         }
     }
+    m_conical_region = nullptr;
     return gcode;
 };
 
@@ -5958,6 +6087,30 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                                      const std::string_view description, double speed,
                                      const EmitModifiers &emit_modifiers)
 {
+    // Skirt and brim share the object's layer but are not on the cone.
+    if (!m_conical_rewrite && !path.empty() && !path_attr.role.is_skirt() && path_attr.role != ExtrusionRole::WipeTower)
+    {
+        Geometry::ArcWelder::Path conical;
+        if (m_conical_defer)
+        {
+            const Geometry::ArcWelder::Path *source = &path;
+            if (this->rewrite_conical_path(path, path_attr.height, conical))
+                source = &conical;
+            this->queue_conical_extrusion(path_attr, *source, description, speed, emit_modifiers);
+            return {};
+        }
+        if (this->rewrite_conical_path(path, path_attr.height, conical))
+        {
+            struct Guard
+            {
+                bool &flag;
+                explicit Guard(bool &flag) : flag(flag) { flag = true; }
+                ~Guard() { flag = false; }
+            } guard{m_conical_rewrite};
+            return this->_extrude(path_attr, conical, description, speed, emit_modifiers);
+        }
+    }
+
     std::string gcode;
     const std::string_view description_bridge = path_attr.role.is_bridge() ? " (bridge)"sv : ""sv;
     const bool use_wave_travel =
@@ -5971,6 +6124,12 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
 
     if (use_wave_travel)
         m_writer.set_travel_speed_override(m_config.wave_overhang_travel_speed.value);
+
+    const auto conical_z = [this, &path_attr](float height_fraction)
+    {
+        const double height = m_conical_rewrite ? double(m_last_height) : double(path_attr.height);
+        return this->m_last_layer_z + (double(height_fraction) - 1.0) * height;
+    };
 
     if (!this->last_position)
     {
@@ -5988,8 +6147,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         comment += description_bridge;
         comment += " point";
         const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
-        const Vec3crd to{to_3d(path.front().point,
-                               scaled(this->m_last_layer_z + (path.front().height_fraction - 1.0) * path_attr.height))};
+        const Vec3crd to{to_3d(path.front().point, scaled(conical_z(path.front().height_fraction)))};
         const std::string travel_gcode{this->travel_to(
             from, to, path_attr.role, comment,
             [this]() { return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer); })};
@@ -5997,8 +6155,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     }
     else if (std::abs(path.front().height_fraction - 1.f) > 1e-4f)
     {
-        const double z = this->m_last_layer_z + (path.front().height_fraction - 1.0) * path_attr.height;
-        gcode += this->m_writer.travel_to_z(z, "contour z");
+        gcode += this->m_writer.travel_to_z(conical_z(path.front().height_fraction), "contour z");
     }
 
     if (use_wave_travel)

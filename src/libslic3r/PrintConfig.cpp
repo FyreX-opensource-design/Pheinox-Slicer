@@ -221,6 +221,11 @@ static const t_config_enum_values s_keys_map_FeatureTempWait{{"off", int(Feature
                                                              {"purge_bucket", int(FeatureTempWait::PurgeBucket)}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FeatureTempWait)
 
+static const t_config_enum_values s_keys_map_ConicalSlicing{{"off", int(ConicalSlicing::Off)},
+                                                            {"outward", int(ConicalSlicing::Outward)},
+                                                            {"inward", int(ConicalSlicing::Inward)}};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ConicalSlicing)
+
 static const t_config_enum_values s_keys_map_SlicingMode{{"regular", int(SlicingMode::Regular)},
                                                          {"even_odd", int(SlicingMode::EvenOdd)},
                                                          {"close_holes", int(SlicingMode::CloseHoles)}};
@@ -1462,6 +1467,19 @@ void PrintConfigDef::init_fff_params()
     def->max = 2;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("conical_slicing", coEnum);
+    def->label = L("Conical slicing");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Slice on a 45° cone centered on the object, then map the toolpaths back onto the "
+                     "original model. Conical out prints from the middle toward the rim. Conical in prints "
+                     "from the rim toward the middle. Each move is split so Z changes by at most two layer "
+                     "heights; when outer wall layer height is set, that bead height is used for the split. "
+                     "Set this on an object or on a modifier. The nozzle is not tilted.");
+    def->set_enum<ConicalSlicing>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
+        {"off", L("Off")}, {"outward", L("Conical out")}, {"inward", L("Conical in")}});
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<ConicalSlicing>(ConicalSlicing::Off));
 
     def = this->add("zaa_enabled", coBool);
     def->label = L("Z anti-aliasing");

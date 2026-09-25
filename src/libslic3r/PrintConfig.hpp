@@ -278,6 +278,16 @@ enum class FeatureTempWait : int
     PurgeBucket,
 };
 
+// 45° conical layers for a vertical nozzle, centered on the object.
+// The mesh is warped, sliced, then mapped back onto the original model.
+// Motion along the cone is split every two layer heights of Z.
+enum class ConicalSlicing : int
+{
+    Off,
+    Outward,
+    Inward,
+};
+
 enum class SlicingMode
 {
     // Regular, applying ClipperLib::pftNonZero rule when creating ExPolygons.
@@ -537,6 +547,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceVisibilityDetection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FeatureTempWait)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ConicalSlicing)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
@@ -1065,7 +1076,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, overhang_speed_0))((ConfigOptionFloatOrPercent, overhang_speed_1))(
         (ConfigOptionFloatOrPercent, overhang_speed_2))((ConfigOptionFloatOrPercent, overhang_speed_3))(
         (ConfigOptionBool, external_perimeters_first))((ConfigOptionFloat, outer_wall_layer_height))(
-        (ConfigOptionBool, outer_wall_slope_antialiasing))((ConfigOptionBool, zaa_enabled))(
+        (ConfigOptionEnum<ConicalSlicing>, conical_slicing))((ConfigOptionBool, outer_wall_slope_antialiasing))(
+        (ConfigOptionBool, zaa_enabled))(
         (ConfigOptionFloat, zaa_min_height))((ConfigOptionBool, extra_perimeters))(
         (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(
         (ConfigOptionBool, wave_overhangs_instead_of_bridges))((ConfigOptionInt, wave_overhang_outer_perimeters))(

@@ -7,6 +7,7 @@
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -32,6 +33,7 @@
 #include <unordered_map>
 #include "Print.hpp"
 #include "ProgressConfig.hpp"
+#include "Subdivide.hpp"
 #include "ShortestPath.hpp"
 #include "admesh/stl.h"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
@@ -84,9 +86,53 @@ LayerPtrs new_layers(PrintObject *print_object,
     return out;
 }
 
+// cos(45°). The forward warp divides XY by this; the slices are multiplied back by it.
+static constexpr double kConeCos = 0.70710678118654757;
+static constexpr double kConeInvCos = 1.4142135623730951;
+
+// (x', y', z') = (x / cos θ, y / cos θ, z + c * r * tan θ), with θ = 45° and the axis at the
+// centered object origin. Inward is shifted up by the object radius so the mesh stays above z = 0.
+// The matching gcode map is the inverse, so the printed solid is the original model.
+static void warp_conical_mesh(indexed_triangle_set &its, const ConicalSlicing mode, const double radius_mm,
+                              const double z_shift_mm)
+{
+    if (mode == ConicalSlicing::Off)
+        return;
+    for (stl_vertex &v : its.vertices)
+    {
+        const double x = double(v.x());
+        const double y = double(v.y());
+        const double z = double(v.z());
+        const double r = std::hypot(x, y);
+        v.x() = float(x * kConeInvCos);
+        v.y() = float(y * kConeInvCos);
+        v.z() = float(z + ((mode == ConicalSlicing::Outward) ? r : (radius_mm - r)) - z_shift_mm);
+    }
+}
+
+static void scale_slices_xy(std::vector<ExPolygons> &layers, const double factor)
+{
+    for (ExPolygons &layer : layers)
+        for (ExPolygon &ex : layer)
+        {
+            auto scale_poly = [factor](Polygon &poly)
+            {
+                for (Point &p : poly.points)
+                {
+                    p.x() = coord_t(std::lround(double(p.x()) * factor));
+                    p.y() = coord_t(std::lround(double(p.y()) * factor));
+                }
+            };
+            scale_poly(ex.contour);
+            for (Polygon &hole : ex.holes)
+                scale_poly(hole);
+        }
+}
+
 // Slice single triangle mesh.
 static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std::vector<float> &zs,
-                                            const MeshSlicingParamsEx &params,
+                                            const MeshSlicingParamsEx &params, const ConicalSlicing conical_mode,
+                                            const double conical_radius_mm, const double conical_z_shift_mm,
                                             const std::function<void()> &throw_on_cancel_callback)
 {
     std::vector<ExPolygons> layers;
@@ -97,9 +143,26 @@ static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std
         {
             MeshSlicingParamsEx params2{params};
             params2.trafo = params2.trafo * volume.get_matrix();
-            if (params2.trafo.rotation().determinant() < 0.)
-                its_flip_triangles(its);
-            layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
+            if (conical_mode == ConicalSlicing::Off)
+            {
+                if (params2.trafo.rotation().determinant() < 0.)
+                    its_flip_triangles(its);
+                layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
+            }
+            else
+            {
+                // Warp in centered object space, then slice. Scale the contours back so the rest of
+                // the slicer works in the original XY. Z is restored when the gcode is written.
+                // The cone is not linear, so a coarse mesh (a box is eight corners, all at the
+                // same radius) would stay flat. Subdivide first so faces actually follow the cone.
+                const Transform3d placed = params2.trafo;
+                its_transform(its, placed, true);
+                its = its_subdivide(its, 0.5f);
+                warp_conical_mesh(its, conical_mode, conical_radius_mm, conical_z_shift_mm);
+                params2.trafo = Transform3d::Identity();
+                layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
+                scale_slices_xy(layers, kConeCos);
+            }
             throw_on_cancel_callback();
         }
     }
@@ -110,7 +173,8 @@ static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std
 // Filter the zs not inside the ranges. The ranges are closed at the bottom and open at the top, they are sorted lexicographically and non overlapping.
 static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std::vector<float> &z,
                                             const std::vector<t_layer_height_range> &ranges,
-                                            const MeshSlicingParamsEx &params,
+                                            const MeshSlicingParamsEx &params, const ConicalSlicing conical_mode,
+                                            const double conical_radius_mm, const double conical_z_shift_mm,
                                             const std::function<void()> &throw_on_cancel_callback)
 {
     std::vector<ExPolygons> out;
@@ -119,7 +183,8 @@ static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std
         if (ranges.size() == 1 && z.front() >= ranges.front().first && z.back() < ranges.front().second)
         {
             // All layers fit into a single range.
-            out = slice_volume(volume, z, params, throw_on_cancel_callback);
+            out = slice_volume(volume, z, params, conical_mode, conical_radius_mm, conical_z_shift_mm,
+                               throw_on_cancel_callback);
         }
         else
         {
@@ -140,7 +205,9 @@ static std::vector<ExPolygons> slice_volume(const ModelVolume &volume, const std
             }
             if (!n_filtered.empty())
             {
-                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, conical_mode,
+                                                             conical_radius_mm, conical_z_shift_mm,
+                                                             throw_on_cancel_callback);
                 out.assign(z.size(), ExPolygons());
                 i = 0;
                 for (const std::pair<size_t, size_t> &span : n_filtered)
@@ -172,7 +239,8 @@ static inline bool model_volume_needs_slicing(const ModelVolume &mv)
 static std::vector<VolumeSlices> slice_volumes_inner(
     const PrintConfig &print_config, const PrintObjectConfig &print_object_config, const Transform3d &object_trafo,
     ModelVolumePtrs model_volumes, const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
-    const std::vector<float> &zs, const std::function<void()> &throw_on_cancel_callback)
+    const std::vector<float> &zs, const ConicalSlicing conical_mode, const double conical_radius_mm,
+    const double conical_z_shift_mm, const std::function<void()> &throw_on_cancel_callback)
 {
     model_volumes_sort_by_id(model_volumes);
 
@@ -238,8 +306,9 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                              ++params.slicing_mode_normal_below_layer)
                             ;
                     }
-                    out.push_back(
-                        {model_volume->id(), slice_volume(*model_volume, zs, params, throw_on_cancel_callback)});
+                    out.push_back({model_volume->id(),
+                                   slice_volume(*model_volume, zs, params, conical_mode, conical_radius_mm,
+                                                conical_z_shift_mm, throw_on_cancel_callback)});
                 }
             }
             else
@@ -251,7 +320,8 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                         slicing_ranges.emplace_back(layer_range.layer_height_range);
                 if (!slicing_ranges.empty())
                     out.push_back({model_volume->id(),
-                                   slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback)});
+                                   slice_volume(*model_volume, zs, slicing_ranges, params, conical_mode,
+                                                conical_radius_mm, conical_z_shift_mm, throw_on_cancel_callback)});
             }
             if (!out.empty() && out.back().slices.empty())
                 out.pop_back();
@@ -776,6 +846,29 @@ void apply_counterbore_bridge_geometry(PrintObject &po)
 // 5) Applies size compensation (offsets the slices in XY plane)
 // 6) Replaces bad slices by the slices reconstructed from the upper/lower layer
 // Resulting expolygons of layer regions are marked as Internal.
+ConicalSlicing PrintObject::conical_slicing_mode() const
+{
+    ConicalSlicing mode = ConicalSlicing::Off;
+    for (const PrintRegion &region : this->all_regions())
+    {
+        const ConicalSlicing region_mode = region.config().conical_slicing.value;
+        if (region_mode == ConicalSlicing::Off)
+            continue;
+        if (mode == ConicalSlicing::Off)
+            mode = region_mode;
+        else if (mode != region_mode)
+            break;
+    }
+    return mode;
+}
+
+double PrintObject::conical_radius_mm() const
+{
+    const double width = unscale<double>(this->size().x());
+    const double depth = unscale<double>(this->size().y());
+    return std::max(0.5, std::hypot(width * 0.5, depth * 0.5));
+}
+
 void PrintObject::slice()
 {
     if (!this->set_started(posSlice))
@@ -798,6 +891,29 @@ void PrintObject::slice()
     m_typed_slices = false;
     this->clear_layers();
     m_layers = new_layers(this, generate_object_layers(m_slicing_params, layer_height_profile));
+    // The 45° warp lifts the mesh by the object radius. Extra planes capture that cap.
+    // Printed Z is mapped back onto the original model, so this does not raise the part.
+    if (this->conical_slicing_mode() != ConicalSlicing::Off && !m_layers.empty())
+    {
+        const double radius = this->conical_radius_mm();
+        const double layer_h = std::max(this->config().layer_height.value, m_slicing_params.min_layer_height);
+        const double zmin = m_slicing_params.object_print_z_min;
+        const double target_slice = m_slicing_params.object_print_z_height() + radius;
+        Layer *prev = m_layers.back();
+        while (prev->slice_z + layer_h < target_slice + 1e-6)
+        {
+            const double lo = prev->print_z - zmin;
+            const double hi = lo + layer_h;
+            const double slice_z = 0.5 * (lo + hi);
+            if (slice_z <= prev->slice_z)
+                break;
+            Layer *layer = new Layer(prev->id() + 1, this, layer_h, hi + zmin, slice_z);
+            prev->upper_layer = layer;
+            layer->lower_layer = prev;
+            m_layers.emplace_back(layer);
+            prev = layer;
+        }
+    }
 
     // Step 2: Slice volumes
     // printf("[%lld] SLICING - Slicing volumes\n",
@@ -1624,11 +1740,130 @@ void apply_fuzzy_skin_segmentation(PrintObject &print_object, ThrowOnCancel thro
 // 6) Replaces bad slices by the slices reconstructed from the upper/lower layer
 // Resulting expolygons of layer regions are marked as Internal.
 //
+// z + r on a triangle. r = hypot(x, y) is smallest toward the axis, so on a face that
+// covers the axis the minimum is inside the face, not at a corner.
+static double conical_outward_face_lowest(const Vec3d &a, const Vec3d &b, const Vec3d &c)
+{
+    double best = std::min({a.z() + std::hypot(a.x(), a.y()), b.z() + std::hypot(b.x(), b.y()),
+                            c.z() + std::hypot(c.x(), c.y())});
+    const Vec3d tri[3] = {a, b, c};
+    for (int i = 0; i < 3; ++i)
+    {
+        const Vec3d &p = tri[i];
+        const Vec3d &q = tri[(i + 1) % 3];
+        const double dx = q.x() - p.x();
+        const double dy = q.y() - p.y();
+        const double dz = q.z() - p.z();
+        const double len2 = dx * dx + dy * dy;
+        if (len2 < 1e-16)
+            continue;
+        // f(t) = z(t) + hypot(x(t), y(t)). A critical point on the edge satisfies
+        // (P·D + t |D|^2) = -dz * r, then squared to a quadratic.
+        const double pdot = p.x() * dx + p.y() * dy;
+        const double rad2_0 = p.x() * p.x() + p.y() * p.y();
+        const double dz2 = dz * dz;
+        const double A = len2 * (len2 - dz2);
+        const double B = 2. * pdot * (len2 - dz2);
+        const double C = pdot * pdot - dz2 * rad2_0;
+        auto consider = [&](double t)
+        {
+            if (t < 0. || t > 1.)
+                return;
+            const double x = p.x() + t * dx;
+            const double y = p.y() + t * dy;
+            const double r = std::hypot(x, y);
+            if (std::abs(pdot + t * len2 + dz * r) > 1e-3 * (1. + r + std::abs(dz)))
+                return;
+            best = std::min(best, p.z() + t * dz + r);
+        };
+        if (std::abs(A) < 1e-10)
+        {
+            if (std::abs(B) > 1e-10)
+                consider(-C / B);
+        }
+        else
+        {
+            const double disc = B * B - 4. * A * C;
+            if (disc >= 0.)
+            {
+                const double root = std::sqrt(disc);
+                consider((-B + root) / (2. * A));
+                consider((-B - root) / (2. * A));
+            }
+        }
+    }
+
+    // Axis inside the face: r = 0 there, which no corner records.
+    const double area = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+    if (std::abs(area) > 1e-12)
+    {
+        const double w_b = ((-a.x()) * (c.y() - a.y()) - (-a.y()) * (c.x() - a.x())) / area;
+        const double w_c = ((b.x() - a.x()) * (-a.y()) - (b.y() - a.y()) * (-a.x())) / area;
+        const double w_a = 1. - w_b - w_c;
+        if (w_a >= -1e-6 && w_b >= -1e-6 && w_c >= -1e-6)
+            best = std::min(best, w_a * a.z() + w_b * b.z() + w_c * c.z());
+    }
+    return best;
+}
+
 // this should be idempotent
+// Lowest warped Z of the model parts, before the extra sink that gives the first slice a printable patch.
+static double conical_lowest_z(const PrintObject &object)
+{
+    const ConicalSlicing mode = object.conical_slicing_mode();
+    if (mode == ConicalSlicing::Off)
+        return 0.;
+    const double radius = object.conical_radius_mm();
+    const Transform3d trafo = object.trafo_centered();
+    double lowest = std::numeric_limits<double>::infinity();
+    for (const ModelVolume *volume : object.model_object()->volumes)
+    {
+        if (!volume->is_model_part())
+            continue;
+        const indexed_triangle_set &its = volume->mesh().its;
+        if (its.vertices.empty())
+            continue;
+        const Transform3d placed = trafo * volume->get_matrix();
+        std::vector<Vec3d> points;
+        points.reserve(its.vertices.size());
+        for (const stl_vertex &src : its.vertices)
+            points.push_back(placed * src.cast<double>());
+        if (mode == ConicalSlicing::Outward)
+        {
+            for (const Vec3d &point : points)
+                lowest = std::min(lowest, point.z() + std::hypot(point.x(), point.y()));
+            for (const stl_triangle_vertex_indices &tri : its.indices)
+            {
+                if (tri[0] >= points.size() || tri[1] >= points.size() || tri[2] >= points.size())
+                    continue;
+                lowest = std::min(lowest, conical_outward_face_lowest(points[tri[0]], points[tri[1]], points[tri[2]]));
+            }
+        }
+        else
+        {
+            for (const Vec3d &point : points)
+                lowest = std::min(lowest, point.z() + (radius - std::hypot(point.x(), point.y())));
+        }
+    }
+    return std::isfinite(lowest) ? lowest : 0.;
+}
+
 void PrintObject::slice_volumes()
 {
     BOOST_LOG_TRIVIAL(info) << "Slicing volumes..." << log_memory_info();
     const Print *print = this->print();
+    if (this->conical_slicing_mode() == ConicalSlicing::Off)
+        m_conical_z_shift = 0.;
+    else
+    {
+        // Drop the cone tip by one bead so the first slice cuts something the nozzle can
+        // extrude. At 45° that sink is also the band of the model that falls below every
+        // slice plane, so a deeper sink leaves the rim (conical in) or the center
+        // (conical out) unprinted.
+        const double nozzle = print->config().nozzle_diameter.size() == 0 ? 0.4
+                                                                           : print->config().nozzle_diameter.get_at(0);
+        m_conical_z_shift = conical_lowest_z(*this) + std::max(nozzle, 0.4);
+    }
     const auto throw_on_cancel_callback = std::function<void()>([print]() { print->throw_if_canceled(); });
 
     // Clear old LayerRegions, allocate for new PrintRegions.
@@ -1644,7 +1879,8 @@ void PrintObject::slice_volumes()
     std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(
         this->model_object()->volumes, *m_shared_regions, slice_zs,
         slice_volumes_inner(print->config(), this->config(), this->trafo_centered(), this->model_object()->volumes,
-                            m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback),
+                            m_shared_regions->layer_ranges, slice_zs, this->conical_slicing_mode(),
+                            this->conical_radius_mm(), m_conical_z_shift, throw_on_cancel_callback),
         throw_on_cancel_callback);
 
     for (size_t region_id = 0; region_id < region_slices.size(); ++region_id)
@@ -1870,7 +2106,9 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
         for (; it_volume != it_volume_end; ++it_volume)
             if ((*it_volume)->type() == model_volume_type)
             {
-                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, this->conical_slicing_mode(),
+                                                             this->conical_radius_mm(), m_conical_z_shift,
+                                                             throw_on_cancel_callback);
                 if (slices.empty())
                 {
                     slices.reserve(slices2.size());

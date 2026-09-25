@@ -374,6 +374,11 @@ public:
     // Height is used for slicing, for sorting the objects by height for sequential printing and for checking vertical clearence in sequential print mode.
     // The height is snug.
     coord_t height() const { return m_size.z(); }
+    // Cone axis is this object's centered origin. Radius is the XY circumradius, in mm.
+    // z shift drops the warped mesh onto the first slice, and the gcode map adds it back.
+    ConicalSlicing conical_slicing_mode() const;
+    double conical_radius_mm() const;
+    double conical_z_shift_mm() const { return m_conical_z_shift; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point &center_offset() const { return m_center_offset; }
 
@@ -558,6 +563,8 @@ private:
     PrintObjectRegions *m_shared_regions{nullptr};
 
     SlicingParameters m_slicing_params;
+    // Millimetres subtracted from the warped mesh so the first slice has something to extrude.
+    double m_conical_z_shift{0};
     LayerPtrs m_layers;
     SupportLayerPtrs m_support_layers;
 

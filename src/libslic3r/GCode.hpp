@@ -509,6 +509,88 @@ private:
     std::string emit_feature_temperature(int temperature, bool lock);
     std::optional<Vec2d> feature_infill_wait_xy() const;
     Vec2d bed_mm_to_gcode(const Vec2d &bed) const;
+
+    // Inverse of the 45° object-centered cone applied at slice time.
+    // z_step is the longest Z change emitted in one move (two layer heights).
+    struct ConicalBand
+    {
+        bool active{false};
+        Vec2d axis{Vec2d::Zero()};
+        double radius{1.};
+        double z_step{0.4};
+        double sign{-1.};
+        double z_shift{0.};
+    };
+    ConicalBand conical_band(const Point &point) const;
+    static double conical_dz(const ConicalBand &band, const Point &point);
+    double conical_z_offset_mm(const Point &point) const;
+    bool rewrite_conical_path(const Geometry::ArcWelder::Path &in, double height_mm,
+                              Geometry::ArcWelder::Path &out) const;
+    bool m_conical_rewrite{false};
+
+    // Restored conical moves are queued, then emitted as stacked slices of one to two layer
+    // heights instead of climbing the whole cone inside each warped slice.
+    struct ConicalQueuedExtrusion
+    {
+        int band{0};
+        const PrintObject *object{nullptr};
+        const PrintRegion *region{nullptr};
+        const Layer *layer{nullptr};
+        int instance_idx{-1};
+        unsigned extruder_id{0};
+        Vec2d origin{Vec2d::Zero()};
+        ExtrusionAttributes attributes;
+        Geometry::ArcWelder::Path path;
+        double speed{0.};
+        std::string description;
+        EmitModifiers emit_modifiers;
+    };
+    struct ConicalBandGrid
+    {
+        bool ready{false};
+        double first_top{0.};
+        double span{0.4};
+        double layer_height{0.2};
+    };
+    struct ConicalEmissionSnapshot
+    {
+        GCodeWriter::AxisState axis;
+        FullPrintConfig config;
+        std::optional<Point> last_position;
+        Vec2d origin{Vec2d::Zero()};
+        const Layer *layer{nullptr};
+        bool object_layer_over_raft{false};
+        float last_height{0.f};
+        float last_layer_z{0.f};
+        float max_layer_z{0.f};
+        float last_width{0.f};
+        float last_region_area{0.f};
+        double last_interlocking_flow{0.};
+        int feature_index{-1};
+        bool feature_temp_locked{false};
+        int feature_commanded_temp{-1};
+        int feature_temp_baseline{0};
+        GCodeExtrusionRole last_processor_role{GCodeExtrusionRole::None};
+        GCodeExtrusionRole last_extrusion_role{GCodeExtrusionRole::None};
+        std::optional<int> manual_fan;
+        bool moved_to_first{false};
+        GCode::PrintObjectInstance current_instance;
+        Geometry::ArcWelder::Path wipe_path;
+        std::string pending_gcode;
+        const PrintRegion *region{nullptr};
+    };
+    void ensure_conical_band_grid();
+    int conical_band_index(double z) const;
+    void queue_conical_extrusion(const ExtrusionAttributes &attribs, const Geometry::ArcWelder::Path &path,
+                                 std::string_view description, double speed, const EmitModifiers &emit_modifiers);
+    std::string flush_conical_bands(const Print &print);
+    ConicalEmissionSnapshot capture_conical_emission_state() const;
+    void restore_conical_emission_state(const ConicalEmissionSnapshot &snapshot);
+    std::vector<ConicalQueuedExtrusion> m_conical_queue;
+    ConicalBandGrid m_conical_grid;
+    bool m_conical_defer{false};
+    const PrintRegion *m_conical_region{nullptr};
+
     int m_feature_index{-1};
     bool m_feature_temp_locked{false};
     int m_feature_commanded_temp{-1};
