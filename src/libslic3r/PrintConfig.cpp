@@ -216,6 +216,11 @@ static const t_config_enum_values s_keys_map_IroningType{{"top", int(IroningType
                                                          {"solid", int(IroningType::AllSolid)}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(IroningType)
 
+static const t_config_enum_values s_keys_map_FeatureTempWait{{"off", int(FeatureTempWait::Off)},
+                                                             {"over_infill", int(FeatureTempWait::OverInfill)},
+                                                             {"purge_bucket", int(FeatureTempWait::PurgeBucket)}};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FeatureTempWait)
+
 static const t_config_enum_values s_keys_map_SlicingMode{{"regular", int(SlicingMode::Regular)},
                                                          {"even_odd", int(SlicingMode::EvenOdd)},
                                                          {"close_holes", int(SlicingMode::CloseHoles)}};
@@ -5357,6 +5362,7 @@ void PrintConfigDef::init_fff_params()
         "still too cold for that flow. Each extruder is controlled on its own, so a toolchanger can preheat the next "
         "hotend while another tool is printing. The high temperature is reached at this filament's max volumetric "
         "flow. If that limit is zero, it is reached at the flow of the fastest 5% of extrusions in the print. "
+        "A feature temperature overrides this while that feature is printing. "
         "Adapted from the MZ Flow Temp processor.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools{false});
@@ -5405,6 +5411,85 @@ void PrintConfigDef::init_fff_params()
     def->max = 120;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats{4.});
+
+    // Per-feature nozzle temperature, flow, and G-code. 0 / empty leaves the feature unchanged.
+#define FEATURE_OVERRIDE(suffix, name)                                                                                 \
+    def = this->add("feature_temp_" suffix, coInts);                                                                  \
+    def->label = L(name " temperature");                                                                              \
+    def->tooltip = L("Nozzle temperature while printing " name                                                        \
+                     ". 0 keeps the filament temperature. Flow temperature control stays off during this override."); \
+    def->sidetext = L("°C");                                                                                          \
+    def->min = 0;                                                                                                     \
+    def->max = max_temp;                                                                                             \
+    def->mode = comAdvanced;                                                                                          \
+    def->set_default_value(new ConfigOptionInts{0});                                                                  \
+    def = this->add("feature_flow_" suffix, coFloats);                                                                \
+    def->label = L(name " flow");                                                                                    \
+    def->tooltip = L("Flow multiplier for " name ". 1 leaves the flow unchanged. 0 disables the override.");         \
+    def->sidetext = L("×");                                                                                          \
+    def->min = 0;                                                                                                     \
+    def->max = 3;                                                                                                     \
+    def->mode = comAdvanced;                                                                                          \
+    def->set_default_value(new ConfigOptionFloats{0.});                                                               \
+    def = this->add("feature_gcode_start_" suffix, coStrings);                                                        \
+    def->label = L(name " start G-code");                                                                            \
+    def->tooltip = L("G-code inserted when " name " starts, after any temperature change. Empty inserts nothing.");  \
+    def->mode = comAdvanced;                                                                                          \
+    def->set_default_value(new ConfigOptionStrings{""});                                                              \
+    def = this->add("feature_gcode_end_" suffix, coStrings);                                                          \
+    def->label = L(name " end G-code");                                                                              \
+    def->tooltip = L("G-code inserted when " name " ends, before the temperature is restored. Empty inserts nothing."); \
+    def->mode = comAdvanced;                                                                                          \
+    def->set_default_value(new ConfigOptionStrings{""});
+
+    FEATURE_OVERRIDE("external_perimeter", "External perimeters")
+    FEATURE_OVERRIDE("perimeter", "Perimeters")
+    FEATURE_OVERRIDE("overhang_perimeter", "Overhang perimeters")
+    FEATURE_OVERRIDE("infill", "Sparse infill")
+    FEATURE_OVERRIDE("solid_infill", "Solid infill")
+    FEATURE_OVERRIDE("top_solid_infill", "Top solid infill")
+    FEATURE_OVERRIDE("bridge", "Bridges")
+    FEATURE_OVERRIDE("support", "Support")
+    FEATURE_OVERRIDE("support_interface", "Support interface")
+#undef FEATURE_OVERRIDE
+
+    def = this->add("feature_temp_wait", coEnum);
+    def->label = L("Feature temperature wait");
+    def->tooltip = L("Where to wait when a feature temperature is different from the filament temperature. "
+                     "Over infill parks inside this layer's infill. Purge bucket follows the approach path, waits "
+                     "there, then leaves by reversing that path.");
+    def->set_enum<FeatureTempWait>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
+        {"off", L("Off")}, {"over_infill", L("Over infill")}, {"purge_bucket", L("Purge bucket")}});
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<FeatureTempWait>(FeatureTempWait::Off));
+
+    def = this->add("feature_purge_bucket", coPoint);
+    def->label = L("Purge bucket");
+    def->tooltip = L("Nozzle position of the purge bucket, in bed coordinates (the same millimeters as the plater). "
+                     "Written as X,Y or XxY.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPoint(Vec2d(0, 0)));
+
+    def = this->add("feature_purge_approach", coPoints);
+    def->label = L("Purge bucket approach");
+    def->tooltip = L("Waypoints visited, in order, on the way to the purge bucket. Use this when the bucket can only "
+                     "be entered from one side. The nozzle leaves by visiting these points in reverse, then returns "
+                     "to the print. Format is XxY pairs separated by commas, for example 10x200,10x220. "
+                     "Leave empty to travel straight to the bucket.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPoints{});
+
+    def = this->add("feature_purge_length", coFloat);
+    def->label = L("Purge length");
+    def->tooltip = L("Filament to extrude at the purge bucket after the temperature is reached. 0 waits without "
+                     "extruding.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("temperature", coInts);
     def->label = L("Other layers");

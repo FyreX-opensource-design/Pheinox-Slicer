@@ -3456,6 +3456,9 @@ LayerResult GCodeGenerator::process_layer(
 
     for (ExtruderExtrusions &extruder_extrusions : extrusions)
     {
+        if (layer_tools.has_wipe_tower && m_wipe_tower)
+            gcode += this->feature_transition(GCodeExtrusionRole::WipeTower);
+
         gcode += (layer_tools.has_wipe_tower && m_wipe_tower)
                      ? m_wipe_tower->tool_change(*this, extruder_extrusions.extruder_id,
                                                  extruder_extrusions.extruder_id == layer_tools.extruders.back())
@@ -3697,6 +3700,7 @@ std::string GCodeGenerator::extrude_interlocking_gap_fills(const LayerRegion *la
                 ExtrusionRole::InterlockingPerimeter);
             if (gcode_role != m_last_processor_extrusion_role)
             {
+                gcode += this->feature_transition(gcode_role);
                 m_last_processor_extrusion_role = gcode_role;
                 char buf[64];
                 sprintf(buf, ";%s%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role).c_str(),
@@ -3763,6 +3767,7 @@ std::string GCodeGenerator::extrude_interlocking_gap_fills(const LayerRegion *la
             }
 
             double e_per_mm = m_writer.extruder()->e_per_mm3() * extrusion_path.mm3_per_mm();
+            e_per_mm *= this->feature_flow_multiplier(GCodeExtrusionRole::InterlockingPerimeter);
 
             // Calculate speed with flow compensation (slower when over-extruding)
             double base_speed = m_config.perimeter_speed.value * 60.0; // mm/min
@@ -6076,6 +6081,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         double flow_multiplier = 1.0 - (m_config.top_surface_flow_reduction.value / 100.0);
         e_per_mm *= flow_multiplier;
     }
+    e_per_mm *= this->feature_flow_multiplier(extrusion_role_to_gcode_extrusion_role(path_attr.role));
 
     // For interlocking perimeters, adjust flow dynamically based on what's directly below
     // using the Layer Context API. This ensures proper bonding when printing on interlocking,
@@ -6659,6 +6665,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     if (GCodeExtrusionRole role = extrusion_role_to_gcode_extrusion_role(path_attr.role);
         role != m_last_processor_extrusion_role)
     {
+        gcode += this->feature_transition(role);
         m_last_processor_extrusion_role = role;
         char buf[64];
         sprintf(buf, ";%s%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role).c_str(),
@@ -7391,12 +7398,19 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
     if (!m_writer.need_toolchange(extruder_id))
         return "";
 
+    // Close a feature override on the outgoing tool before the switch.
+    std::string left_feature;
+    if (m_writer.extruder())
+        left_feature = this->feature_transition(GCodeExtrusionRole::None);
+    m_feature_commanded_temp = -1;
+    m_feature_temp_baseline = 0;
+
     // if we are running a single-extruder setup, just set the extruder and return nothing
     if (!m_writer.multiple_extruders)
     {
         this->placeholder_parser().set("current_extruder", extruder_id);
 
-        std::string gcode;
+        std::string gcode = std::move(left_feature);
         // Append the filament start G-code.
         const std::string &start_filament_gcode = m_config.start_filament_gcode.get_at(extruder_id);
         if (!start_filament_gcode.empty())
@@ -7419,7 +7433,7 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
         return gcode;
     }
 
-    std::string gcode{};
+    std::string gcode = std::move(left_feature);
     if (!this->m_config.complete_objects.value)
     {
         gcode += this->m_label_objects.maybe_stop_instance();

@@ -805,6 +805,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
                  have_perimeters && config->opt_float("outer_wall_layer_height") > 0.);
     toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
 
+    if (config->option("feature_temp_wait") != nullptr)
+    {
+        const bool purge_bucket =
+            config->opt_enum<FeatureTempWait>("feature_temp_wait") == FeatureTempWait::PurgeBucket;
+        toggle_field("feature_purge_bucket", purge_bucket);
+        toggle_field("feature_purge_approach", purge_bucket);
+        toggle_field("feature_purge_length", purge_bucket);
+    }
+
     bool have_wave_overhangs = have_perimeters && config->opt_bool("wave_overhangs");
     for (auto el : {"wave_overhangs_instead_of_bridges", "wave_overhang_outer_perimeters",
                     "wave_overhang_perimeter_overlap", "wave_overhang_minimum_width", "wave_overhang_pattern",

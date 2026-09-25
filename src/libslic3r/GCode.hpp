@@ -499,6 +499,21 @@ private:
                          std::string_view description, double speed,
                          const EmitModifiers &emit_modifiers = EmitModifiers());
 
+    // Per-feature temperature, flow, and custom G-code. 0 / empty leaves that feature alone.
+    double feature_flow_multiplier(GCodeExtrusionRole role) const;
+    std::string feature_transition(GCodeExtrusionRole new_role);
+    int feature_temperature_of(int feature) const;
+    double feature_flow_of(int feature) const;
+    std::string feature_custom_gcode(int feature, bool start) const;
+    int feature_baseline_temperature() const;
+    std::string emit_feature_temperature(int temperature, bool lock);
+    std::optional<Vec2d> feature_infill_wait_xy() const;
+    Vec2d bed_mm_to_gcode(const Vec2d &bed) const;
+    int m_feature_index{-1};
+    bool m_feature_temp_locked{false};
+    int m_feature_commanded_temp{-1};
+    int m_feature_temp_baseline{0};
+
     // Follow the model surface within this layer on top infill, ironing, and walls that the
     // outer-wall stepper is not already placing.
     void contour_top_surface(GCode::SmoothPath &path);

@@ -20,6 +20,15 @@
 
 preFlight is an advanced 3D printing slicer. Building on the Slic3r legacy as a "spiritual successor" to PrusaSlicer, it offers exclusive features and a comprehensive under-the-hood overhaul, bringing the entire dependency stack up to modern standards. Switching is easy: preFlight natively imports PrusaSlicer and OrcaSlicer profiles so you can be up and running in minutes. To put it mildly, this is no ordinary fork.
 
+Though the community has made a lot of post proccessers, and now (among other features) They're implemented into one slicer.
+
+* (TenTech): outer wall layer height: https://github.com/TengerTechnologies/Smoothificator
+* (Built from TenTech): sloped outer wall AA
+* (SB3D systems/Yury-MonZon): Gcode flow temp (per filament is our own thing): https://github.com/Yury-MonZon/MZ_Flow_Temp_processor
+* (Theaninova): ZAA: https://github.com/Theaninova/GCodeZAA
+* (Own Feature): Custom infill
+* (Own feature): Cat, shark, and puppy infill.
+
 - Visit **[preflight3d.com](https://preflight3d.com)** for features, screenshots, and details.
 - Community discussion on [GitHub Discussions](https://github.com/oozebot/preFlight/discussions/categories/preflight-features) and the [Duet3D forum](https://forum.duet3d.com/category/44/preflight).
 

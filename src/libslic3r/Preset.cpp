@@ -833,6 +833,10 @@ static std::vector<std::string> s_Preset_print_options{
     "travel_short_distance_acceleration",
     "print_nozzle_diameters",
     "print_high_flow_nozzle",
+    "feature_temp_wait",
+    "feature_purge_bucket",
+    "feature_purge_approach",
+    "feature_purge_length",
 };
 
 static std::vector<std::string> s_Preset_filament_options{
@@ -847,7 +851,18 @@ static std::vector<std::string> s_Preset_filament_options{
     "filament_cooling_final_speed", "filament_ramming_parameters", "filament_minimal_purge_on_wipe_tower",
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "temperature",
     "idle_temperature", "first_layer_temperature", "flow_temp_enabled", "flow_temp_low", "flow_temp_high",
-    "flow_temp_sec_per_c_heating", "flow_temp_sec_per_c_cooling", "bed_temperature", "first_layer_bed_temperature",
+    "flow_temp_sec_per_c_heating", "flow_temp_sec_per_c_cooling", "feature_temp_external_perimeter",
+    "feature_flow_external_perimeter", "feature_gcode_start_external_perimeter", "feature_gcode_end_external_perimeter",
+    "feature_temp_perimeter", "feature_flow_perimeter", "feature_gcode_start_perimeter", "feature_gcode_end_perimeter",
+    "feature_temp_overhang_perimeter", "feature_flow_overhang_perimeter", "feature_gcode_start_overhang_perimeter",
+    "feature_gcode_end_overhang_perimeter", "feature_temp_infill", "feature_flow_infill", "feature_gcode_start_infill",
+    "feature_gcode_end_infill", "feature_temp_solid_infill", "feature_flow_solid_infill",
+    "feature_gcode_start_solid_infill", "feature_gcode_end_solid_infill", "feature_temp_top_solid_infill",
+    "feature_flow_top_solid_infill", "feature_gcode_start_top_solid_infill", "feature_gcode_end_top_solid_infill",
+    "feature_temp_bridge", "feature_flow_bridge", "feature_gcode_start_bridge", "feature_gcode_end_bridge",
+    "feature_temp_support", "feature_flow_support", "feature_gcode_start_support", "feature_gcode_end_support",
+    "feature_temp_support_interface", "feature_flow_support_interface", "feature_gcode_start_support_interface",
+    "feature_gcode_end_support_interface", "bed_temperature", "first_layer_bed_temperature",
     "fan_always_on",
     "cooling", "cooling_slowdown_logic", "cooling_perimeter_transition_distance", "min_fan_speed", "max_fan_speed",
     "bridge_fan_speed", "fan_spinup_bridge_infill", "fan_spinup_overhang_perimeter", "fan_spinup_serpentine_overhang",
@@ -1821,6 +1836,7 @@ static const std::set<std::string> independent_from_extruder_number_options = {
     // These are print preset options that should be treated as single values, not indexed by extruder
     "print_nozzle_diameters",
     "print_high_flow_nozzle",
+    "feature_purge_approach",
 };
 
 bool PresetCollection::is_independent_from_extruder_number_option(const std::string &opt_key)

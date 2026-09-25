@@ -226,6 +226,7 @@ set(SLIC3R_SOURCES
     GCode/GCodeProcessor.hpp
     GCode/FlowTemp.cpp
     GCode/FlowTemp.hpp
+    GCode/FeatureOverrides.cpp
     GCode/AvoidCrossingPerimeters.cpp
     GCode/AvoidCrossingPerimeters.hpp
     GCode/Travels.cpp

@@ -264,6 +264,45 @@ class Settings:
     fan_spinup_overhang_perimeter: str  # semicolon-separated bools
     fan_spinup_serpentine_overhang: str  # semicolon-separated bools
     fan_spinup_time: str  # semicolon-separated ints
+    feature_flow_bridge: str  # semicolon-separated floats
+    feature_flow_external_perimeter: str  # semicolon-separated floats
+    feature_flow_infill: str  # semicolon-separated floats
+    feature_flow_overhang_perimeter: str  # semicolon-separated floats
+    feature_flow_perimeter: str  # semicolon-separated floats
+    feature_flow_solid_infill: str  # semicolon-separated floats
+    feature_flow_support: str  # semicolon-separated floats
+    feature_flow_support_interface: str  # semicolon-separated floats
+    feature_flow_top_solid_infill: str  # semicolon-separated floats
+    feature_gcode_end_bridge: str  # semicolon-separated
+    feature_gcode_end_external_perimeter: str  # semicolon-separated
+    feature_gcode_end_infill: str  # semicolon-separated
+    feature_gcode_end_overhang_perimeter: str  # semicolon-separated
+    feature_gcode_end_perimeter: str  # semicolon-separated
+    feature_gcode_end_solid_infill: str  # semicolon-separated
+    feature_gcode_end_support: str  # semicolon-separated
+    feature_gcode_end_support_interface: str  # semicolon-separated
+    feature_gcode_end_top_solid_infill: str  # semicolon-separated
+    feature_gcode_start_bridge: str  # semicolon-separated
+    feature_gcode_start_external_perimeter: str  # semicolon-separated
+    feature_gcode_start_infill: str  # semicolon-separated
+    feature_gcode_start_overhang_perimeter: str  # semicolon-separated
+    feature_gcode_start_perimeter: str  # semicolon-separated
+    feature_gcode_start_solid_infill: str  # semicolon-separated
+    feature_gcode_start_support: str  # semicolon-separated
+    feature_gcode_start_support_interface: str  # semicolon-separated
+    feature_gcode_start_top_solid_infill: str  # semicolon-separated
+    feature_purge_approach: str  # coordinate pairs
+    feature_purge_bucket: str
+    feature_purge_length: str  # float
+    feature_temp_bridge: str  # semicolon-separated ints
+    feature_temp_external_perimeter: str  # semicolon-separated ints
+    feature_temp_infill: str  # semicolon-separated ints
+    feature_temp_overhang_perimeter: str  # semicolon-separated ints
+    feature_temp_perimeter: str  # semicolon-separated ints
+    feature_temp_solid_infill: str  # semicolon-separated ints
+    feature_temp_support: str  # semicolon-separated ints
+    feature_temp_support_interface: str  # semicolon-separated ints
+    feature_temp_top_solid_infill: str  # semicolon-separated ints
     filament_abrasive: str  # semicolon-separated bools
     filament_colour: str  # semicolon-separated
     filament_cooling_final_speed: str  # semicolon-separated floats

@@ -270,6 +270,14 @@ enum class IroningType
     Count,
 };
 
+// Where to wait while a feature temperature change heats or cools.
+enum class FeatureTempWait : int
+{
+    Off,
+    OverInfill,
+    PurgeBucket,
+};
+
 enum class SlicingMode
 {
     // Regular, applying ClipperLib::pftNonZero rule when creating ExPolygons.
@@ -528,6 +536,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinVisibilityDetection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceVisibilityDetection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FeatureTempWait)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
@@ -1274,7 +1283,32 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionFloatOrPercent, first_layer_travel_speed))((ConfigOptionInts, first_layer_temperature))(
         (ConfigOptionBools, flow_temp_enabled))((ConfigOptionInts, flow_temp_low))((ConfigOptionInts, flow_temp_high))(
         (ConfigOptionFloats, flow_temp_sec_per_c_heating))((ConfigOptionFloats, flow_temp_sec_per_c_cooling))(
-        (ConfigOptionIntsNullable, idle_temperature))((ConfigOptionInts, full_fan_speed_layer))(
+        (ConfigOptionInts, feature_temp_external_perimeter))((ConfigOptionFloats, feature_flow_external_perimeter))(
+        (ConfigOptionStrings, feature_gcode_start_external_perimeter))(
+        (ConfigOptionStrings, feature_gcode_end_external_perimeter))((ConfigOptionInts, feature_temp_perimeter))(
+        (ConfigOptionFloats, feature_flow_perimeter))((ConfigOptionStrings, feature_gcode_start_perimeter))(
+        (ConfigOptionStrings, feature_gcode_end_perimeter))((ConfigOptionInts, feature_temp_overhang_perimeter))(
+        (ConfigOptionFloats, feature_flow_overhang_perimeter))((ConfigOptionStrings,
+                                                               feature_gcode_start_overhang_perimeter))(
+        (ConfigOptionStrings, feature_gcode_end_overhang_perimeter))((ConfigOptionInts, feature_temp_infill))(
+        (ConfigOptionFloats, feature_flow_infill))((ConfigOptionStrings, feature_gcode_start_infill))(
+        (ConfigOptionStrings, feature_gcode_end_infill))((ConfigOptionInts, feature_temp_solid_infill))(
+        (ConfigOptionFloats, feature_flow_solid_infill))((ConfigOptionStrings, feature_gcode_start_solid_infill))(
+        (ConfigOptionStrings, feature_gcode_end_solid_infill))((ConfigOptionInts, feature_temp_top_solid_infill))(
+        (ConfigOptionFloats, feature_flow_top_solid_infill))((ConfigOptionStrings,
+                                                             feature_gcode_start_top_solid_infill))(
+        (ConfigOptionStrings, feature_gcode_end_top_solid_infill))((ConfigOptionInts, feature_temp_bridge))(
+        (ConfigOptionFloats, feature_flow_bridge))((ConfigOptionStrings, feature_gcode_start_bridge))(
+        (ConfigOptionStrings, feature_gcode_end_bridge))((ConfigOptionInts, feature_temp_support))(
+        (ConfigOptionFloats, feature_flow_support))((ConfigOptionStrings, feature_gcode_start_support))(
+        (ConfigOptionStrings, feature_gcode_end_support))((ConfigOptionInts, feature_temp_support_interface))(
+        (ConfigOptionFloats, feature_flow_support_interface))((ConfigOptionStrings,
+                                                              feature_gcode_start_support_interface))(
+        (ConfigOptionStrings, feature_gcode_end_support_interface))((ConfigOptionEnum<FeatureTempWait>,
+                                                                    feature_temp_wait))(
+        (ConfigOptionPoint, feature_purge_bucket))((ConfigOptionPoints, feature_purge_approach))(
+        (ConfigOptionFloat, feature_purge_length))((ConfigOptionIntsNullable, idle_temperature))(
+        (ConfigOptionInts, full_fan_speed_layer))(
         (ConfigOptionFloat, infill_acceleration))((ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))(
         (ConfigOptionFloats, max_layer_height))((ConfigOptionInts, min_fan_speed))(
         (ConfigOptionFloats, min_layer_height))((ConfigOptionFloat, max_print_height))(

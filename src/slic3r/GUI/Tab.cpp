@@ -2334,6 +2334,12 @@ void TabPrint::build()
     optgroup->append_single_option_line("wipe_tower_no_sparse_layers");
     optgroup->append_single_option_line("single_extruder_multi_material_priming");
 
+    optgroup = page->new_optgroup_for_sidebar(L("Feature temperature wait"));
+    optgroup->append_single_option_line("feature_temp_wait");
+    optgroup->append_single_option_line("feature_purge_bucket");
+    optgroup->append_single_option_line("feature_purge_approach");
+    optgroup->append_single_option_line("feature_purge_length");
+
     optgroup = page->new_optgroup_for_sidebar(L("Advanced"));
     optgroup->append_single_option_line("interface_shells");
     optgroup->append_single_option_line("mmu_segmented_region_max_width");
@@ -3321,6 +3327,24 @@ void TabFilament::build()
     optgroup->append_single_option_line("flow_temp_high");
     optgroup->append_single_option_line("flow_temp_sec_per_c_heating");
     optgroup->append_single_option_line("flow_temp_sec_per_c_cooling");
+
+    optgroup = page->new_optgroup_for_sidebar(L("Feature overrides"));
+    for (const char *key : {"feature_temp_external_perimeter", "feature_flow_external_perimeter",
+                            "feature_gcode_start_external_perimeter", "feature_gcode_end_external_perimeter",
+                            "feature_temp_perimeter", "feature_flow_perimeter", "feature_gcode_start_perimeter",
+                            "feature_gcode_end_perimeter", "feature_temp_overhang_perimeter",
+                            "feature_flow_overhang_perimeter", "feature_gcode_start_overhang_perimeter",
+                            "feature_gcode_end_overhang_perimeter", "feature_temp_infill", "feature_flow_infill",
+                            "feature_gcode_start_infill", "feature_gcode_end_infill", "feature_temp_solid_infill",
+                            "feature_flow_solid_infill", "feature_gcode_start_solid_infill",
+                            "feature_gcode_end_solid_infill", "feature_temp_top_solid_infill",
+                            "feature_flow_top_solid_infill", "feature_gcode_start_top_solid_infill",
+                            "feature_gcode_end_top_solid_infill", "feature_temp_bridge", "feature_flow_bridge",
+                            "feature_gcode_start_bridge", "feature_gcode_end_bridge", "feature_temp_support",
+                            "feature_flow_support", "feature_gcode_start_support", "feature_gcode_end_support",
+                            "feature_temp_support_interface", "feature_flow_support_interface",
+                            "feature_gcode_start_support_interface", "feature_gcode_end_support_interface"})
+        optgroup->append_single_option_line(key);
 
     line = {L("Bed"), ""};
     line.append_option(optgroup->get_option("first_layer_bed_temperature"));

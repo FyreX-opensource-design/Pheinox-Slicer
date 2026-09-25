@@ -259,6 +259,25 @@ std::string apply_flow_temp(const std::string &gcode, const PrintConfig &config)
         i = j + 1;
     }
 
+    // Feature temperature overrides are bracketed by these comments. Flow temperature must not
+    // rewrite or replace the nozzle setpoint while one is active.
+    std::vector<char> feature_temp_lock(lines.size(), 0);
+    {
+        bool lock = false;
+        for (size_t li = 0; li < lines.size(); ++li)
+        {
+            if (lines[li].find("FEATURE_TEMP_END") != std::string::npos)
+            {
+                feature_temp_lock[li] = 1;
+                lock = false;
+                continue;
+            }
+            if (lines[li].find("FEATURE_TEMP_BEGIN") != std::string::npos)
+                lock = true;
+            feature_temp_lock[li] = lock ? 1 : 0;
+        }
+    }
+
     const bool volumetric = config.use_volumetric_e.value;
     bool rel_e = config.use_relative_e_distances.value;
     bool rel_xyz = false;
@@ -471,7 +490,7 @@ std::string apply_flow_temp(const std::string &gcode, const PrintConfig &config)
             // start-gcode preheat is not immediately overwritten with the low temperature.
             const bool engaged = mv.tool == static_cast<int>(ti) || sum_t[ti] > 1e-9 ||
                                  ctl.last_cmd != std::numeric_limits<int>::min();
-            if (engaged && cmd != ctl.last_cmd)
+            if (!feature_temp_lock[mv.line] && engaged && cmd != ctl.last_cmd)
             {
                 ctl.last_cmd = cmd;
                 if (multi)
@@ -479,7 +498,8 @@ std::string apply_flow_temp(const std::string &gcode, const PrintConfig &config)
                 else
                     prepend[mv.line] += "M104 S" + std::to_string(cmd) + "\n";
             }
-            if (mv.extruding && mv.tool == static_cast<int>(ti) && mv.flow > max_allowed && mv.f > 0.)
+            if (!feature_temp_lock[mv.line] && mv.extruding && mv.tool == static_cast<int>(ti) && mv.flow > max_allowed &&
+                mv.f > 0.)
             {
                 double feed = (max_allowed / mv.flow) * mv.f;
                 feed = std::max(feed, ctl.min_feed);
@@ -496,8 +516,8 @@ std::string apply_flow_temp(const std::string &gcode, const PrintConfig &config)
         if (!prepend[li].empty())
             out += prepend[li];
         const int temp_tool = temp_line_tool[li];
-        if (li >= first_ex && li <= last_ex && temp_tool != std::numeric_limits<int>::min() && temp_tool >= 0 &&
-            static_cast<size_t>(temp_tool) < ntools && tools[temp_tool].active)
+        if (!feature_temp_lock[li] && li >= first_ex && li <= last_ex && temp_tool != std::numeric_limits<int>::min() &&
+            temp_tool >= 0 && static_cast<size_t>(temp_tool) < ntools && tools[temp_tool].active)
             continue;
         std::string line = lines[li];
         if (new_feed[li] >= 0)
