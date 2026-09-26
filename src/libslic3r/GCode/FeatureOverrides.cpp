@@ -417,7 +417,11 @@ GCodeGenerator::ConicalBand GCodeGenerator::conical_band(const Point &) const
         return band;
 
     const PrintObject *object = m_layer->object();
-    const ConicalSlicing mode = object->conical_slicing_mode();
+    ConicalSlicing mode = ConicalSlicing::Off;
+    if (m_conical_region != nullptr)
+        mode = m_conical_region->config().conical_slicing.value;
+    else if (!object->conical_slicing_mixed())
+        mode = object->conical_slicing_mode();
     if (mode == ConicalSlicing::Off)
         return band;
 
@@ -440,7 +444,10 @@ GCodeGenerator::ConicalBand GCodeGenerator::conical_band(const Point &) const
     // z_shift is the mesh sink plus the gap from the nozzle height down to the slice plane.
     band.axis = Vec2d::Zero();
     band.radius = object->conical_radius_mm();
-    band.z_shift = object->conical_z_shift_mm() + (m_layer->slice_z - m_layer->print_z);
+    const double shift = (mode == ConicalSlicing::Inward && object->conical_slicing_mixed())
+                             ? object->conical_z_shift_inward_mm()
+                             : object->conical_z_shift_mm();
+    band.z_shift = shift + (m_layer->slice_z - m_layer->print_z);
     band.z_step = std::max(0.05, 2. * step);
     band.sign = mode == ConicalSlicing::Inward ? 1. : -1.;
     band.active = true;
@@ -590,12 +597,19 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
         item.support = attribs.role.is_support();
         item.object = m_layer ? m_layer->object() : nullptr;
         item.region = item.support ? nullptr : m_conical_region;
+        const bool region_off =
+            item.region == nullptr || item.region->config().conical_slicing.value == ConicalSlicing::Off;
+        item.horizontal =
+            item.support || (item.object != nullptr && item.object->conical_slicing_mixed() && region_off);
         item.layer = m_layer;
         item.instance_idx = m_current_instance.instance_idx;
         item.extruder_id = m_writer.extruder()->id();
         item.origin = m_origin;
         item.attributes = attribs;
         item.path = std::move(piece);
+        item.z_key = std::numeric_limits<float>::infinity();
+        for (const Geometry::ArcWelder::Segment &seg : item.path)
+            item.z_key = std::min(item.z_key, seg.height_fraction);
         item.speed = speed;
         item.description = std::string(description);
         item.emit_modifiers = emit_modifiers;
@@ -651,11 +665,18 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
     if (m_conical_queue.empty())
         return {};
 
+    const bool mixed_horizontal = std::any_of(m_conical_queue.begin(), m_conical_queue.end(),
+                                               [](const ConicalQueuedExtrusion &item)
+                                               { return item.horizontal && !item.support; });
     std::stable_sort(m_conical_queue.begin(), m_conical_queue.end(),
-                     [](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
+                     [mixed_horizontal](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
                      {
                          if (a.band != b.band)
                              return a.band < b.band;
+                         // A modifier's cone shares the queue with the rest of the object. Print
+                         // whichever plastic is lower first. A fully conical object keeps its path order.
+                         if (mixed_horizontal && std::abs(a.z_key - b.z_key) > 1e-3f)
+                             return a.z_key < b.z_key;
                          // Supports at this height print before the object that sits on them.
                          return a.support && !b.support;
                      });
@@ -784,6 +805,8 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 applied_object = item.object;
                 applied_region = item.region;
             }
+            // Travels during this emit use the same cone as the queued path.
+            m_conical_region = item.horizontal ? nullptr : item.region;
             if (m_writer.extruder() == nullptr || m_writer.extruder()->id() != item.extruder_id)
                 gcode += this->set_extruder(item.extruder_id, layer_z);
             if (m_origin != item.origin)
@@ -800,11 +823,12 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 gcode += this->m_label_objects.maybe_change_instance(m_writer);
             }
 
-            // Support is a flat layer at the Z it was sliced. Encoding it into the band's
-            // slope scale shifts that Z, because extrusion then measures height as the bead.
+            // Flat paths (supports, and object regions outside a conical modifier) were sliced
+            // at one Z. Encoding them into the band's slope scale shifts that Z, because
+            // extrusion then measures height as the bead.
             const float saved_layer_z = m_last_layer_z;
             const float saved_height = m_last_height;
-            if (item.support)
+            if (item.horizontal)
             {
                 const double z = item.path.front().height_fraction;
                 for (Geometry::ArcWelder::Segment &seg : item.path)
@@ -827,7 +851,7 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 ~Guard() { flag = false; }
             } guard{m_conical_rewrite};
             gcode += this->_extrude(item.attributes, item.path, item.description, item.speed, item.emit_modifiers);
-            if (item.support)
+            if (item.horizontal)
             {
                 m_last_layer_z = saved_layer_z;
                 m_last_height = saved_height;
@@ -837,6 +861,7 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
     }
 
     this->set_origin(Vec2d::Zero());
+    m_conical_region = nullptr;
     m_conical_queue.clear();
     m_conical_grid = {};
     return gcode;

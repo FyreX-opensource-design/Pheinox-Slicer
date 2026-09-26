@@ -779,7 +779,10 @@ inline bool has_compatible_dynamic_overhang_speed(const PrintRegionConfig &confi
 // If there is any incompatibility, separate LayerRegions have to be created.
 inline bool has_compatible_layer_regions(const PrintRegionConfig &config, const PrintRegionConfig &other_config)
 {
-    return config.perimeter_extruder == other_config.perimeter_extruder &&
+    // Different cones must stay apart. Merged perimeters are stored on one region and would
+    // all be written with that region's slope.
+    return config.conical_slicing == other_config.conical_slicing &&
+           config.perimeter_extruder == other_config.perimeter_extruder &&
            config.perimeters == other_config.perimeters && config.perimeter_speed == other_config.perimeter_speed &&
            config.external_perimeter_speed == other_config.external_perimeter_speed &&
            config.overhangs == other_config.overhangs &&

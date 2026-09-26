@@ -6092,12 +6092,17 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     if (!m_conical_rewrite && !path.empty() && !path_attr.role.is_skirt() && path_attr.role != ExtrusionRole::WipeTower)
     {
         const bool support = path_attr.role.is_support();
+        const bool region_conical =
+            m_conical_region != nullptr && m_conical_region->config().conical_slicing.value != ConicalSlicing::Off;
+        const bool mixed = m_layer != nullptr && m_layer->object() != nullptr && m_layer->object()->conical_slicing_mixed();
+        // Supports, and the part of a modifier object that is not inside the cone, stay flat.
+        const bool keep_horizontal = support || (mixed && !region_conical);
         Geometry::ArcWelder::Path conical;
         if (m_conical_defer)
         {
             Geometry::ArcWelder::Path flat;
             const Geometry::ArcWelder::Path *source = &path;
-            if (support)
+            if (keep_horizontal)
             {
                 flat = path;
                 for (Geometry::ArcWelder::Segment &seg : flat)
@@ -6109,7 +6114,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
             this->queue_conical_extrusion(path_attr, *source, description, speed, emit_modifiers);
             return {};
         }
-        if (!support && this->rewrite_conical_path(path, path_attr.height, conical))
+        if (!keep_horizontal && this->rewrite_conical_path(path, path_attr.height, conical))
         {
             struct Guard
             {

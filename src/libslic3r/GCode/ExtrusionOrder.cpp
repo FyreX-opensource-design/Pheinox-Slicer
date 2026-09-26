@@ -125,7 +125,9 @@ std::vector<Perimeter> extract_perimeter_extrusions(const Print &print, const La
     std::vector<Perimeter> result;
 
     const LayerRegion &layerm = *layer.get_region(island.perimeters.region());
-    const PrintRegion &region = print.get_print_region(layerm.region().print_region_id());
+    // The object's own region carries the modifier's cone. The print-wide region id can point
+    // at a different copy, and that copy was dropping the modifier's mode.
+    const PrintRegion &region = layerm.region();
 
     for (uint32_t perimeter_id : island.perimeters)
     {
@@ -314,6 +316,7 @@ std::vector<InfillRange> extract_infill_ranges(const Print &print, const Layer &
                                                const ExtractEntityPredicate &should_pick_extrusion,
                                                const PathSmoothingFunction &smooth_path, const unsigned extruder_id)
 {
+    (void) print;
     std::vector<InfillRange> result;
     for (auto it = island.fills.begin(); it != island.fills.end();)
     {
@@ -322,9 +325,8 @@ std::vector<InfillRange> extract_infill_ranges(const Print &print, const Layer &
         for (++it_end; it_end != island.fills.end() && it->region() == it_end->region(); ++it_end)
             ;
         const LayerRegion &layerm = *layer.get_region(it->region());
-        // PrintObjects own the PrintRegions, thus the pointer to PrintRegion would be unique to a PrintObject, they would not
-        // identify the content of PrintRegion accross the whole print uniquely. Translate to a Print specific PrintRegion.
-        const PrintRegion &region = print.get_print_region(layerm.region().print_region_id());
+        // Keep the object's region. Its cone can differ from the print-wide region of the same id.
+        const PrintRegion &region = layerm.region();
 
         ExtrusionEntitiesPtr extrusions{
             extract_infill_extrusions(region, layerm.fills(), it, it_end, should_pick_extrusion)};
@@ -391,10 +393,8 @@ std::vector<IslandExtrusions> extract_island_extrusions(const LayerSlice &lslice
     for (const LayerIsland &island : ordered_islands)
     {
         const LayerRegion &layerm = *layer.get_region(island.perimeters.region());
-        // PrintObjects own the PrintRegions, thus the pointer to PrintRegion would be
-        // unique to a PrintObject, they would not identify the content of PrintRegion
-        // accross the whole print uniquely. Translate to a Print specific PrintRegion.
-        const PrintRegion &region = print.get_print_region(layerm.region().print_region_id());
+        // Keep the object's region so a modifier's cone is not replaced by the print-wide copy.
+        const PrintRegion &region = layerm.region();
 
         result.push_back(IslandExtrusions{&region});
         IslandExtrusions &island_extrusions{result.back()};

@@ -378,8 +378,11 @@ public:
     // Cone axis is this object's centered origin. Radius is the XY circumradius, in mm.
     // z shift drops the warped mesh onto the first slice, and the gcode map adds it back.
     ConicalSlicing conical_slicing_mode() const;
+    // Regions of this object do not all use the same conical mode.
+    bool conical_slicing_mixed() const;
     double conical_radius_mm() const;
     double conical_z_shift_mm() const { return m_conical_z_shift; }
+    double conical_z_shift_inward_mm() const { return m_conical_z_shift_inward; }
     // Regions of this object that print on the first layer once the cone is mapped back.
     // The raw first slice is only the cone's cut, so skirt and brim must not use it.
     ExPolygons conical_bed_islands() const;
@@ -569,6 +572,7 @@ private:
     SlicingParameters m_slicing_params;
     // Millimetres subtracted from the warped mesh so the first slice has something to extrude.
     double m_conical_z_shift{0};
+    double m_conical_z_shift_inward{0};
     // Slices of the mesh before the conical warp, indexed [layer][region]. Support
     // generation swaps these in so the cone does not move where supports are placed.
     std::vector<std::vector<ExPolygons>> m_unwarped_region_slices;

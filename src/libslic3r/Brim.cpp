@@ -239,7 +239,7 @@ static PaintedEarResult make_brim_ears_painted(const PrintObject *object, const 
 // Returns ExPolygons of the bottom layer of the print object after elephant foot compensation.
 static ExPolygons get_print_object_bottom_layer_expolygons(const PrintObject &print_object)
 {
-    if (print_object.conical_slicing_mode() != ConicalSlicing::Off)
+    if (print_object.conical_slicing_mode() != ConicalSlicing::Off && !print_object.conical_slicing_mixed())
         return print_object.conical_bed_islands();
 
     ExPolygons ex_polygons;

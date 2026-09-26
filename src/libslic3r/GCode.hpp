@@ -535,6 +535,10 @@ private:
         int band{0};
         // Support stays a horizontal layer. It is printed before the object in the same band.
         bool support{false};
+        // Flat object plastic from a region that is not conical, queued so it stays in Z order
+        // with the modifier's cone instead of being printed as a full pass first.
+        bool horizontal{false};
+        float z_key{0.f};
         const PrintObject *object{nullptr};
         const PrintRegion *region{nullptr};
         const Layer *layer{nullptr};

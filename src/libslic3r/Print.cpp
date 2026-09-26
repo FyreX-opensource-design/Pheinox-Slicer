@@ -1505,7 +1505,7 @@ void Print::_make_skirt()
     for (const PrintObject *object : m_objects)
     {
         Points object_points;
-        if (object->conical_slicing_mode() != ConicalSlicing::Off)
+        if (object->conical_slicing_mode() != ConicalSlicing::Off && !object->conical_slicing_mixed())
         {
             // The first cone slice is a small patch around the axis. The plastic that
             // actually sits on the bed is that patch mapped back across every slice.
@@ -1651,7 +1651,7 @@ Polygons Print::first_layer_islands() const
     for (PrintObject *object : m_objects)
     {
         Polygons object_islands;
-        if (object->conical_slicing_mode() != ConicalSlicing::Off)
+        if (object->conical_slicing_mode() != ConicalSlicing::Off && !object->conical_slicing_mixed())
         {
             for (const ExPolygon &expoly : object->conical_bed_islands())
                 object_islands.push_back(expoly.contour);

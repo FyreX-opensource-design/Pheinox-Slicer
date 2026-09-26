@@ -338,6 +338,15 @@ static inline VolumeSlices &volume_slices_find_by_id(std::vector<VolumeSlices> &
     return *it;
 }
 
+static inline VolumeSlices *volume_slices_find_by_id_opt(std::vector<VolumeSlices> &volume_slices, const ObjectID id)
+{
+    auto it = lower_bound_by_predicate(volume_slices.begin(), volume_slices.end(),
+                                       [id](const VolumeSlices &vs) { return vs.volume_id < id; });
+    if (it == volume_slices.end() || it->volume_id != id)
+        return nullptr;
+    return &*it;
+}
+
 static inline bool overlap_in_xy(const PrintObjectRegions::BoundingBox &l, const PrintObjectRegions::BoundingBox &r)
 {
     return !(l.max().x() < r.min().x() || l.min().x() > r.max().x() || l.max().y() < r.min().y() ||
@@ -860,6 +869,24 @@ ConicalSlicing PrintObject::conical_slicing_mode() const
             break;
     }
     return mode;
+}
+
+bool PrintObject::conical_slicing_mixed() const
+{
+    bool seen = false;
+    ConicalSlicing mode = ConicalSlicing::Off;
+    for (const PrintRegion &region : this->all_regions())
+    {
+        const ConicalSlicing region_mode = region.config().conical_slicing.value;
+        if (!seen)
+        {
+            mode = region_mode;
+            seen = true;
+        }
+        else if (region_mode != mode)
+            return true;
+    }
+    return false;
 }
 
 double PrintObject::conical_radius_mm() const
@@ -1808,9 +1835,8 @@ static double conical_outward_face_lowest(const Vec3d &a, const Vec3d &b, const 
 
 // this should be idempotent
 // Lowest warped Z of the model parts, before the extra sink that gives the first slice a printable patch.
-static double conical_lowest_z(const PrintObject &object)
+static double conical_lowest_z(const PrintObject &object, const ConicalSlicing mode)
 {
-    const ConicalSlicing mode = object.conical_slicing_mode();
     if (mode == ConicalSlicing::Off)
         return 0.;
     const double radius = object.conical_radius_mm();
@@ -1905,21 +1931,227 @@ ExPolygons PrintObject::conical_bed_islands() const
     return union_ex(islands);
 }
 
+// Each conical mode is clipped to the volumes that asked for it. A modifier keeps the
+// cone the user set on it. The rest of the object keeps the print setting, including
+// when that setting is the other cone direction. Masks are the modifier's real
+// cross-section; the warped modifier does not line up with the volume that was drawn.
+static void apply_mixed_conical_regions(PrintObject &object, std::vector<VolumeSlices> &warped_volumes,
+                                        std::vector<VolumeSlices> &horizontal_volumes, const ConicalSlicing mode,
+                                        const double z_shift)
+{
+    const bool outward = mode == ConicalSlicing::Outward;
+    const double radius_mm = object.conical_radius_mm();
+    const size_t nlayers = object.layers().size();
+    const auto regions = object.all_regions();
+
+    for (size_t layer_id = 0; layer_id < nlayers; ++layer_id)
+    {
+        Layer &layer = *object.layers()[layer_id];
+        for (size_t region_id = 0; region_id < regions.size() && region_id < layer.region_count(); ++region_id)
+        {
+            if (regions[region_id].get().config().conical_slicing.value != mode)
+                continue;
+            layer.get_region(int(region_id))->m_slices.clear();
+        }
+    }
+
+    struct ModifierMask
+    {
+        ObjectID volume_id;
+        int region_id{-1};
+        ConicalSlicing mode{ConicalSlicing::Off};
+    };
+    std::vector<ModifierMask> modifiers;
+    std::vector<int> part_regions;
+    std::vector<ObjectID> part_ids_of_mode;
+    std::vector<ObjectID> negative_ids;
+    if (const PrintObjectRegions *shared = object.shared_regions())
+    {
+        for (const PrintObjectRegions::LayerRangeRegions &range : shared->layer_ranges)
+        {
+            for (const PrintObjectRegions::VolumeRegion &volume_region : range.volume_regions)
+            {
+                const ModelVolume *volume = volume_region.model_volume;
+                if (volume == nullptr || volume_region.region == nullptr)
+                    continue;
+                if (volume->is_negative_volume())
+                {
+                    if (std::find(negative_ids.begin(), negative_ids.end(), volume->id()) == negative_ids.end())
+                        negative_ids.push_back(volume->id());
+                    continue;
+                }
+                const int region_id = volume_region.region->print_object_region_id();
+                const ConicalSlicing region_mode = volume_region.region->config().conical_slicing.value;
+                if (volume->is_modifier())
+                {
+                    const ObjectID id = volume->id();
+                    if (std::any_of(modifiers.begin(), modifiers.end(),
+                                    [id](const ModifierMask &mask) { return mask.volume_id == id; }))
+                        continue;
+                    modifiers.push_back({id, region_id, region_mode});
+                }
+                else if (volume->is_model_part() && region_mode == mode)
+                {
+                    if (std::find(part_ids_of_mode.begin(), part_ids_of_mode.end(), volume->id()) ==
+                        part_ids_of_mode.end())
+                        part_ids_of_mode.push_back(volume->id());
+                    if (std::find(part_regions.begin(), part_regions.end(), region_id) == part_regions.end())
+                        part_regions.push_back(region_id);
+                }
+            }
+        }
+    }
+
+    std::vector<ObjectID> part_ids;
+    for (const ModelVolume *volume : object.model_object()->volumes)
+        if (volume->is_model_part())
+            part_ids.push_back(volume->id());
+
+    for (size_t src = 0; src < nlayers; ++src)
+    {
+        auto slices_at = [&](const std::vector<ObjectID> &ids)
+        {
+            ExPolygons polys;
+            for (const ObjectID id : ids)
+            {
+                VolumeSlices *slices = volume_slices_find_by_id_opt(warped_volumes, id);
+                if (slices == nullptr || src >= slices->slices.size() || slices->slices[src].empty())
+                    continue;
+                append(polys, slices->slices[src]);
+            }
+            if (polys.size() > 1)
+                polys = union_ex(polys);
+            return polys;
+        };
+        ExPolygons cone = slices_at(part_ids);
+        if (cone.empty())
+            continue;
+        for (const ObjectID id : negative_ids)
+        {
+            VolumeSlices *holes = volume_slices_find_by_id_opt(horizontal_volumes, id);
+            if (holes == nullptr || src >= holes->slices.size() || holes->slices[src].empty())
+                continue;
+            cone = diff_ex(cone, holes->slices[src]);
+            if (cone.empty())
+                break;
+        }
+        if (cone.empty())
+            continue;
+
+        // A point on this cone prints at a different height than the slice plane. Test the
+        // modifier at that printed height, otherwise the other cone only survives in a band
+        // and the rest of its volume is cut out of the object.
+        const double slice_z = object.layers()[src]->slice_z;
+        ExPolygons parent = part_ids_of_mode.empty() ? ExPolygons{} : slices_at(part_ids_of_mode);
+        std::vector<ExPolygons> clipped(regions.size());
+        const auto circle_at = [](const double radius)
+        {
+            const double err = std::min(0.15, std::max(radius * 0.2, 1e-3));
+            return make_circle(scale_(radius), scale_(err));
+        };
+        for (size_t band_id = 0; band_id < nlayers; ++band_id)
+        {
+            const Layer &band = *object.layers()[band_id];
+            const double low = band.bottom_z();
+            const double high = band.print_z;
+            // Radii past the object cannot hold a slice. The first and last bands also take
+            // every point that prints below the bed or above the last layer.
+            const double r_cap = radius_mm + 1.;
+
+            double r_min;
+            double r_max;
+            if (outward)
+            {
+                r_min = slice_z + z_shift - high;
+                r_max = slice_z + z_shift - low;
+                if (band_id == 0)
+                    r_max = r_cap;
+                if (band_id + 1 == nlayers)
+                    r_min = 0.;
+            }
+            else
+            {
+                r_min = low - slice_z + radius_mm - z_shift;
+                r_max = high - slice_z + radius_mm - z_shift;
+                if (band_id == 0)
+                    r_min = 0.;
+                if (band_id + 1 == nlayers)
+                    r_max = r_cap;
+            }
+            if (r_max <= 0.05)
+                continue;
+            r_min = std::max(0., r_min);
+            if (r_min >= r_max - 1e-6)
+                continue;
+
+            ExPolygons ring = intersection_ex(cone, Polygons{circle_at(r_max)});
+            if (ring.empty())
+                continue;
+            if (r_min > 0.05)
+                ring = diff_ex(ring, Polygons{circle_at(r_min)});
+            if (ring.empty())
+                continue;
+
+            for (const ModifierMask &modifier : modifiers)
+            {
+                VolumeSlices *mask = volume_slices_find_by_id_opt(horizontal_volumes, modifier.volume_id);
+                if (mask == nullptr || band_id >= mask->slices.size() || mask->slices[band_id].empty())
+                    continue;
+                ExPolygons owned = intersection_ex(ring, mask->slices[band_id]);
+                if (owned.empty())
+                    continue;
+                if (!parent.empty())
+                    parent = diff_ex(parent, owned);
+                if (modifier.mode == mode && modifier.region_id >= 0 &&
+                    size_t(modifier.region_id) < clipped.size())
+                    append(clipped[modifier.region_id], std::move(owned));
+            }
+        }
+        if (part_regions.size() == 1 && !parent.empty() && part_regions.front() >= 0 &&
+            size_t(part_regions.front()) < clipped.size())
+            append(clipped[part_regions.front()], std::move(parent));
+
+        Layer &layer = *object.layers()[src];
+        for (size_t region_id = 0; region_id < clipped.size() && region_id < layer.region_count(); ++region_id)
+        {
+            if (clipped[region_id].empty())
+                continue;
+            ExPolygons polys = union_ex(clipped[region_id]);
+            if (!polys.empty())
+                layer.get_region(int(region_id))->m_slices.append(std::move(polys), stInternal);
+        }
+    }
+}
+
 void PrintObject::slice_volumes()
 {
     BOOST_LOG_TRIVIAL(info) << "Slicing volumes..." << log_memory_info();
     const Print *print = this->print();
-    if (this->conical_slicing_mode() == ConicalSlicing::Off)
-        m_conical_z_shift = 0.;
-    else
     {
         // Drop the cone tip by one bead so the first slice cuts something the nozzle can
         // extrude. At 45° that sink is also the band of the model that falls below every
         // slice plane, so a deeper sink leaves the rim (conical in) or the center
-        // (conical out) unprinted.
+        // (conical out) unprinted. Inward and outward do not share a sink.
         const double nozzle = print->config().nozzle_diameter.size() == 0 ? 0.4
                                                                            : print->config().nozzle_diameter.get_at(0);
-        m_conical_z_shift = conical_lowest_z(*this) + std::max(nozzle, 0.4);
+        const double bead = std::max(nozzle, 0.4);
+        const auto shift_for = [&](const ConicalSlicing mode)
+        { return mode == ConicalSlicing::Off ? 0. : conical_lowest_z(*this, mode) + bead; };
+        if (this->conical_slicing_mixed())
+        {
+            m_conical_z_shift = shift_for(ConicalSlicing::Outward);
+            m_conical_z_shift_inward = shift_for(ConicalSlicing::Inward);
+        }
+        else if (this->conical_slicing_mode() == ConicalSlicing::Off)
+        {
+            m_conical_z_shift = 0.;
+            m_conical_z_shift_inward = 0.;
+        }
+        else
+        {
+            m_conical_z_shift = shift_for(this->conical_slicing_mode());
+            m_conical_z_shift_inward = 0.;
+        }
     }
     const auto throw_on_cancel_callback = std::function<void()>([print]() { print->throw_if_canceled(); });
 
@@ -1934,11 +2166,23 @@ void PrintObject::slice_volumes()
 
     m_unwarped_region_slices.clear();
     std::vector<float> slice_zs = zs_from_layers(m_layers);
-    std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(
-        this->model_object()->volumes, *m_shared_regions, slice_zs,
+    // A mesh modifier has to be clipped in the volume that was drawn. Warping the modifier
+    // mesh itself punches a hole, including when the modifier uses the same cone as the object.
+    const bool mixed_conical = this->conical_slicing_mixed();
+    const bool has_mesh_modifier =
+        std::any_of(this->model_object()->volumes.begin(), this->model_object()->volumes.end(),
+                    [](const ModelVolume *volume) { return volume->is_modifier(); });
+    const bool clip_conical = has_mesh_modifier && this->conical_slicing_mode() != ConicalSlicing::Off;
+    const ConicalSlicing slice_mode = (mixed_conical || clip_conical) ? ConicalSlicing::Off : this->conical_slicing_mode();
+    std::vector<VolumeSlices> horizontal_volumes =
         slice_volumes_inner(print->config(), this->config(), this->trafo_centered(), this->model_object()->volumes,
-                            m_shared_regions->layer_ranges, slice_zs, this->conical_slicing_mode(),
-                            this->conical_radius_mm(), m_conical_z_shift, throw_on_cancel_callback),
+                            m_shared_regions->layer_ranges, slice_zs, slice_mode, this->conical_radius_mm(),
+                            m_conical_z_shift, throw_on_cancel_callback);
+    // Modifier masks stay in the drawn volume. The region split below consumes its copy.
+    std::vector<VolumeSlices> modifier_masks =
+        (mixed_conical || clip_conical) ? horizontal_volumes : std::vector<VolumeSlices>{};
+    std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(
+        this->model_object()->volumes, *m_shared_regions, slice_zs, std::move(horizontal_volumes),
         throw_on_cancel_callback);
 
     for (size_t region_id = 0; region_id < region_slices.size(); ++region_id)
@@ -1957,7 +2201,41 @@ void PrintObject::slice_volumes()
     region_slices.clear();
 
     // A second, unwarped slice. Supports are placed on this outline; the cone stays on the object.
-    if (this->conical_slicing_mode() != ConicalSlicing::Off)
+    // Mixed mode already sliced unwarped above, so that result is the support outline.
+    if (mixed_conical || clip_conical)
+    {
+        const size_t nlayers = m_layers.size();
+        const size_t nregions = m_shared_regions->all_regions.size();
+        m_unwarped_region_slices.assign(nlayers, std::vector<ExPolygons>(nregions));
+        for (size_t layer_id = 0; layer_id < nlayers; ++layer_id)
+        {
+            Layer &layer = *m_layers[layer_id];
+            const size_t regions_here = std::min(nregions, layer.region_count());
+            for (size_t region_id = 0; region_id < regions_here; ++region_id)
+                m_unwarped_region_slices[layer_id][region_id] =
+                    to_expolygons(layer.get_region(int(region_id))->m_slices.surfaces);
+        }
+        const auto object_regions = this->all_regions();
+        const ConicalSlicing modes[] = {ConicalSlicing::Outward, ConicalSlicing::Inward};
+        for (const ConicalSlicing mode : modes)
+        {
+            const bool used = std::any_of(object_regions.begin(), object_regions.end(),
+                                          [mode](const std::reference_wrapper<const PrintRegion> &region)
+                                          { return region.get().config().conical_slicing.value == mode; });
+            if (!used)
+                continue;
+            // A single global mode stores its sink in m_conical_z_shift, inward or outward.
+            // Mixed mode keeps the inward sink separate.
+            const double shift = (mixed_conical && mode == ConicalSlicing::Inward) ? m_conical_z_shift_inward
+                                                                                    : m_conical_z_shift;
+            std::vector<VolumeSlices> warped_volumes = slice_volumes_inner(
+                print->config(), this->config(), this->trafo_centered(), this->model_object()->volumes,
+                m_shared_regions->layer_ranges, slice_zs, mode, this->conical_radius_mm(), shift,
+                throw_on_cancel_callback);
+            apply_mixed_conical_regions(*this, warped_volumes, modifier_masks, mode, shift);
+        }
+    }
+    else if (this->conical_slicing_mode() != ConicalSlicing::Off)
     {
         std::vector<std::vector<ExPolygons>> unwarped = slices_to_regions(
             this->model_object()->volumes, *m_shared_regions, slice_zs,
@@ -2190,7 +2468,9 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
         for (; it_volume != it_volume_end; ++it_volume)
             if ((*it_volume)->type() == model_volume_type)
             {
-                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, this->conical_slicing_mode(),
+                const ConicalSlicing support_mode =
+                    this->conical_slicing_mixed() ? ConicalSlicing::Off : this->conical_slicing_mode();
+                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, support_mode,
                                                              this->conical_radius_mm(), m_conical_z_shift,
                                                              throw_on_cancel_callback);
                 if (slices.empty())
