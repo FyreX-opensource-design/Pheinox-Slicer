@@ -6142,7 +6142,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
 
     const auto conical_z = [this, &path_attr](float height_fraction)
     {
-        const double height = m_conical_rewrite ? double(m_last_height) : double(path_attr.height);
+        // m_last_height is still the band span when a travel is planned. The queued
+        // fraction was divided by the bead, so the travel has to use the bead too.
+        const double height = path_attr.height > 1e-6f ? double(path_attr.height) : double(m_last_height);
         return this->m_last_layer_z + (double(height_fraction) - 1.0) * height;
     };
 
@@ -6161,7 +6163,10 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         comment += description;
         comment += description_bridge;
         comment += " point";
-        const Vec3crd from{to_3d(*this->last_position, scaled(this->m_last_layer_z))};
+        // A cone move does not sit on m_last_layer_z. Starting the travel there
+        // lifts the nozzle to the top of the band between every fragment.
+        const double from_z = m_conical_rewrite ? this->m_writer.get_position().z() : double(this->m_last_layer_z);
+        const Vec3crd from{to_3d(*this->last_position, scaled(from_z))};
         const Vec3crd to{to_3d(path.front().point, scaled(conical_z(path.front().height_fraction)))};
         const std::string travel_gcode{this->travel_to(
             from, to, path_attr.role, comment,
@@ -7261,8 +7266,10 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                         if (std::abs(it->height_fraction - 1.f) > 1e-4f ||
                             std::abs(std::prev(it)->height_fraction - 1.f) > 1e-4f)
                         {
+                            const double z_scale = (m_conical_rewrite && path_attr.height > 1e-6f) ? double(path_attr.height)
+                                                                                                   : double(m_last_height);
                             const Vec3d destination{
-                                to_3d(p, this->m_last_layer_z + (it->height_fraction - 1) * m_last_height)};
+                                to_3d(p, this->m_last_layer_z + (it->height_fraction - 1) * z_scale)};
                             gcode += m_writer.extrude_to_xyz(destination, extrusion_amount);
                         }
                         else

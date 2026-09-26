@@ -668,15 +668,23 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
     const bool mixed_horizontal = std::any_of(m_conical_queue.begin(), m_conical_queue.end(),
                                                [](const ConicalQueuedExtrusion &item)
                                                { return item.horizontal && !item.support; });
+    // Within one layer height, keep the order paths were queued in. Sorting every fragment
+    // by its exact Z breaks a cone wall into a travel between each bead. Paths a full layer
+    // apart still print lower first, so the flat region is not buried under the cone.
+    const double z_quantum = std::max(0.05, m_conical_grid.ready ? m_conical_grid.layer_height
+                                                                 : m_config.layer_height.value);
     std::stable_sort(m_conical_queue.begin(), m_conical_queue.end(),
-                     [mixed_horizontal](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
+                     [mixed_horizontal, z_quantum](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
                      {
                          if (a.band != b.band)
                              return a.band < b.band;
-                         // A modifier's cone shares the queue with the rest of the object. Print
-                         // whichever plastic is lower first. A fully conical object keeps its path order.
-                         if (mixed_horizontal && std::abs(a.z_key - b.z_key) > 1e-3f)
-                             return a.z_key < b.z_key;
+                         if (mixed_horizontal)
+                         {
+                             const int qa = int(std::floor((double(a.z_key) + 1e-4) / z_quantum));
+                             const int qb = int(std::floor((double(b.z_key) + 1e-4) / z_quantum));
+                             if (qa != qb)
+                                 return qa < qb;
+                         }
                          // Supports at this height print before the object that sits on them.
                          return a.support && !b.support;
                      });
@@ -778,7 +786,6 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
             current_band = band;
         }
         const double layer_z = m_last_layer_z;
-        const double layer_h = std::max(1e-4, double(m_last_height));
 
         for (size_t i = index; i < end; ++i)
         {
@@ -824,10 +831,13 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
             }
 
             // Flat paths (supports, and object regions outside a conical modifier) were sliced
-            // at one Z. Encoding them into the band's slope scale shifts that Z, because
-            // extrusion then measures height as the bead.
+            // at one Z. Cone paths are encoded against the bead height, which is what extrusion
+            // multiplies back out. Encoding against the band span instead prints the cone at
+            // half slope and sends travels to the top of the band.
             const float saved_layer_z = m_last_layer_z;
             const float saved_height = m_last_height;
+            const double bead = item.attributes.height > 1e-6f ? double(item.attributes.height)
+                                                               : std::max(1e-4, double(nominal_layer));
             if (item.horizontal)
             {
                 const double z = item.path.front().height_fraction;
@@ -840,7 +850,7 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 for (Geometry::ArcWelder::Segment &seg : item.path)
                 {
                     const double z = seg.height_fraction;
-                    seg.height_fraction = float(1. + (z - layer_z) / layer_h);
+                    seg.height_fraction = float(1. + (z - layer_z) / bead);
                 }
             }
 
