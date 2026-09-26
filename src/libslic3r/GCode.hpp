@@ -533,6 +533,8 @@ private:
     struct ConicalQueuedExtrusion
     {
         int band{0};
+        // Support stays a horizontal layer. It is printed before the object in the same band.
+        bool support{false};
         const PrintObject *object{nullptr};
         const PrintRegion *region{nullptr};
         const Layer *layer{nullptr};

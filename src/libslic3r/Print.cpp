@@ -1505,14 +1505,24 @@ void Print::_make_skirt()
     for (const PrintObject *object : m_objects)
     {
         Points object_points;
-        // Get object layers up to skirt_height_z.
-        for (const Layer *layer : object->m_layers)
+        if (object->conical_slicing_mode() != ConicalSlicing::Off)
         {
-            if (layer->print_z > skirt_height_z)
-                break;
-            for (const ExPolygon &expoly : layer->lslices)
-                // Collect the outer contour points only, ignore holes for the calculation of the convex hull.
+            // The first cone slice is a small patch around the axis. The plastic that
+            // actually sits on the bed is that patch mapped back across every slice.
+            for (const ExPolygon &expoly : object->conical_bed_islands())
                 append(object_points, expoly.contour.points);
+        }
+        else
+        {
+            // Get object layers up to skirt_height_z.
+            for (const Layer *layer : object->m_layers)
+            {
+                if (layer->print_z > skirt_height_z)
+                    break;
+                for (const ExPolygon &expoly : layer->lslices)
+                    // Collect the outer contour points only, ignore holes for the calculation of the convex hull.
+                    append(object_points, expoly.contour.points);
+            }
         }
         // Get support layers up to skirt_height_z.
         for (const SupportLayer *layer : object->support_layers())
@@ -1641,8 +1651,16 @@ Polygons Print::first_layer_islands() const
     for (PrintObject *object : m_objects)
     {
         Polygons object_islands;
-        for (ExPolygon &expoly : object->m_layers.front()->lslices)
-            object_islands.push_back(expoly.contour);
+        if (object->conical_slicing_mode() != ConicalSlicing::Off)
+        {
+            for (const ExPolygon &expoly : object->conical_bed_islands())
+                object_islands.push_back(expoly.contour);
+        }
+        else
+        {
+            for (ExPolygon &expoly : object->m_layers.front()->lslices)
+                object_islands.push_back(expoly.contour);
+        }
         if (!object->support_layers().empty())
             object->support_layers().front()->support_fills.polygons_covered_by_spacing(object_islands,
                                                                                         float(SCALED_EPSILON));

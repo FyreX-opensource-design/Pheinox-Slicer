@@ -1834,7 +1834,8 @@ static double conical_lowest_z(const PrintObject &object)
                 lowest = std::min(lowest, point.z() + std::hypot(point.x(), point.y()));
             for (const stl_triangle_vertex_indices &tri : its.indices)
             {
-                if (tri[0] >= points.size() || tri[1] >= points.size() || tri[2] >= points.size())
+                if (tri[0] < 0 || tri[1] < 0 || tri[2] < 0 || size_t(tri[0]) >= points.size() ||
+                    size_t(tri[1]) >= points.size() || size_t(tri[2]) >= points.size())
                     continue;
                 lowest = std::min(lowest, conical_outward_face_lowest(points[tri[0]], points[tri[1]], points[tri[2]]));
             }
@@ -1846,6 +1847,62 @@ static double conical_lowest_z(const PrintObject &object)
         }
     }
     return std::isfinite(lowest) ? lowest : 0.;
+}
+
+ExPolygons PrintObject::conical_bed_islands() const
+{
+    if (m_layers.empty() || this->conical_slicing_mode() == ConicalSlicing::Off)
+        return {};
+
+    const bool outward = this->conical_slicing_mode() == ConicalSlicing::Outward;
+    const double z_shift = m_conical_z_shift;
+    const double radius = this->conical_radius_mm();
+    const double first_z = m_layers.front()->print_z;
+    // The inverse puts a slice point at slice_z ∓ r + shift. Keep the band that lands
+    // on the first layer, not the whole cone cut.
+    const double tol = std::max(m_layers.front()->height, 0.05);
+    const double low = -tol;
+    const double high = first_z + tol;
+
+    ExPolygons islands;
+    for (const Layer *layer : m_layers)
+    {
+        if (layer->lslices.empty())
+            continue;
+        double r_min;
+        double r_max;
+        if (outward)
+        {
+            // printed_z = slice_z - r + z_shift
+            r_min = layer->slice_z + z_shift - high;
+            r_max = layer->slice_z + z_shift - low;
+        }
+        else
+        {
+            // printed_z = slice_z + r - radius + z_shift
+            r_min = low - layer->slice_z + radius - z_shift;
+            r_max = high - layer->slice_z + radius - z_shift;
+        }
+        if (r_max <= 0.05)
+            continue;
+        r_min = std::max(0., r_min);
+        if (r_min >= r_max - 1e-6)
+            continue;
+
+        const Polygon outer = make_circle(scale_(r_max), scale_(0.15));
+        ExPolygons band = intersection_ex(layer->lslices, Polygons{outer});
+        if (band.empty())
+            continue;
+        if (r_min > 0.05)
+        {
+            const Polygon inner = make_circle(scale_(r_min), scale_(0.15));
+            band = diff_ex(band, Polygons{inner});
+        }
+        append(islands, std::move(band));
+    }
+    if (islands.empty())
+        return {};
+    return union_ex(islands);
 }
 
 void PrintObject::slice_volumes()
@@ -1875,6 +1932,7 @@ void PrintObject::slice_volumes()
             layer->m_regions.emplace_back(new LayerRegion(layer, pr.get()));
     }
 
+    m_unwarped_region_slices.clear();
     std::vector<float> slice_zs = zs_from_layers(m_layers);
     std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(
         this->model_object()->volumes, *m_shared_regions, slice_zs,
@@ -1898,6 +1956,30 @@ void PrintObject::slice_volumes()
 
     region_slices.clear();
 
+    // A second, unwarped slice. Supports are placed on this outline; the cone stays on the object.
+    if (this->conical_slicing_mode() != ConicalSlicing::Off)
+    {
+        std::vector<std::vector<ExPolygons>> unwarped = slices_to_regions(
+            this->model_object()->volumes, *m_shared_regions, slice_zs,
+            slice_volumes_inner(print->config(), this->config(), this->trafo_centered(), this->model_object()->volumes,
+                                m_shared_regions->layer_ranges, slice_zs, ConicalSlicing::Off, 0., 0.,
+                                throw_on_cancel_callback),
+            throw_on_cancel_callback);
+        const size_t nlayers = m_layers.size();
+        const size_t nregions = unwarped.size();
+        m_unwarped_region_slices.assign(nlayers, std::vector<ExPolygons>(nregions));
+        for (size_t region_id = 0; region_id < nregions; ++region_id)
+        {
+            const size_t layers_here = std::min(nlayers, unwarped[region_id].size());
+            for (size_t layer_id = 0; layer_id < layers_here; ++layer_id)
+            {
+                if (!unwarped[region_id][layer_id].empty())
+                    unwarped[region_id][layer_id] = union_ex(unwarped[region_id][layer_id]);
+                m_unwarped_region_slices[layer_id][region_id] = std::move(unwarped[region_id][layer_id]);
+            }
+        }
+    }
+
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - removing top empty layers";
     while (!m_layers.empty())
     {
@@ -1907,6 +1989,8 @@ void PrintObject::slice_volumes()
         delete layer;
         m_layers.pop_back();
     }
+    if (m_unwarped_region_slices.size() > m_layers.size())
+        m_unwarped_region_slices.resize(m_layers.size());
     if (!m_layers.empty())
         m_layers.back()->upper_layer = nullptr;
     m_print->throw_if_canceled();

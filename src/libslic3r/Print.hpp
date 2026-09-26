@@ -29,6 +29,7 @@
 #include "PrintBase.hpp"
 
 #include "BoundingBox.hpp"
+#include "ExPolygon.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -379,6 +380,9 @@ public:
     ConicalSlicing conical_slicing_mode() const;
     double conical_radius_mm() const;
     double conical_z_shift_mm() const { return m_conical_z_shift; }
+    // Regions of this object that print on the first layer once the cone is mapped back.
+    // The raw first slice is only the cone's cut, so skirt and brim must not use it.
+    ExPolygons conical_bed_islands() const;
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point &center_offset() const { return m_center_offset; }
 
@@ -565,6 +569,9 @@ private:
     SlicingParameters m_slicing_params;
     // Millimetres subtracted from the warped mesh so the first slice has something to extrude.
     double m_conical_z_shift{0};
+    // Slices of the mesh before the conical warp, indexed [layer][region]. Support
+    // generation swaps these in so the cone does not move where supports are placed.
+    std::vector<std::vector<ExPolygons>> m_unwarped_region_slices;
     LayerPtrs m_layers;
     SupportLayerPtrs m_support_layers;
 

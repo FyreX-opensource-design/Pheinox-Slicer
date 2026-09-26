@@ -1641,7 +1641,10 @@ static inline std::pair<SupportGeneratorLayer *, SupportGeneratorLayer *> new_co
 
         // Contact layer will be printed with a normal flow, but
         // it will support layers printed with a bridging flow.
-        if (object_config.thick_bridges && SupportMaterialInternal::has_bridging_extrusions(layer))
+        // Bridging extrusions are from the cone, so they must not shift the contact layer.
+        if (object_config.thick_bridges &&
+            (layer.object() == nullptr || layer.object()->conical_slicing_mode() == ConicalSlicing::Off) &&
+            SupportMaterialInternal::has_bridging_extrusions(layer))
         {
             coordf_t bridging_height = 0.;
             for (const LayerRegion *region : layer.regions())
@@ -3426,7 +3429,8 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(const PrintObject
                     polygons_append(polygons_trimming,
                                     offset(object_layer.lslices, gap_xy_scaled, jtRound, scaled<float>(0.1)));
                 }
-                if (!m_slicing_params.soluble_interface && m_object_config->thick_bridges)
+                if (!m_slicing_params.soluble_interface && m_object_config->thick_bridges &&
+                    object.conical_slicing_mode() == ConicalSlicing::Off)
                 {
                     // Collect all bottom surfaces, which will be extruded with a bridging flow.
                     for (; i < object.layers().size(); ++i)

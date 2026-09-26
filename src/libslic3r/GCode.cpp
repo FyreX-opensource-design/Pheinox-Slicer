@@ -6087,19 +6087,29 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                                      const std::string_view description, double speed,
                                      const EmitModifiers &emit_modifiers)
 {
-    // Skirt and brim share the object's layer but are not on the cone.
+    // Skirt and brim share the object's layer but are not on the cone. Supports are
+    // generated from the original model and stay horizontal at their layer height.
     if (!m_conical_rewrite && !path.empty() && !path_attr.role.is_skirt() && path_attr.role != ExtrusionRole::WipeTower)
     {
+        const bool support = path_attr.role.is_support();
         Geometry::ArcWelder::Path conical;
         if (m_conical_defer)
         {
+            Geometry::ArcWelder::Path flat;
             const Geometry::ArcWelder::Path *source = &path;
-            if (this->rewrite_conical_path(path, path_attr.height, conical))
+            if (support)
+            {
+                flat = path;
+                for (Geometry::ArcWelder::Segment &seg : flat)
+                    seg.height_fraction = 1.f;
+                source = &flat;
+            }
+            else if (this->rewrite_conical_path(path, path_attr.height, conical))
                 source = &conical;
             this->queue_conical_extrusion(path_attr, *source, description, speed, emit_modifiers);
             return {};
         }
-        if (this->rewrite_conical_path(path, path_attr.height, conical))
+        if (!support && this->rewrite_conical_path(path, path_attr.height, conical))
         {
             struct Guard
             {

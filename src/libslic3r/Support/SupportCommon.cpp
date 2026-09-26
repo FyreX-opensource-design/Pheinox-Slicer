@@ -169,6 +169,12 @@ void support_debug_layer_census(const char *tag, const char *cat, const SupportG
 void remove_bridges_from_contacts(const PrintConfig &print_config, const Layer &lower_layer, const LayerRegion &layerm,
                                   float fw, Polygons &contact_polygons)
 {
+    // Perimeters belong to the cone. Using them here would punch the supports that were
+    // placed on the original model.
+    if (const PrintObject *object = layerm.layer()->object();
+        object != nullptr && object->conical_slicing_mode() != ConicalSlicing::Off)
+        return;
+
     // compute the area of bridging perimeters
     Polygons bridges;
     {

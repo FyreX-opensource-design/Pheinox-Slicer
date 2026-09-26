@@ -587,8 +587,9 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
             return;
         ConicalQueuedExtrusion item;
         item.band = band;
+        item.support = attribs.role.is_support();
         item.object = m_layer ? m_layer->object() : nullptr;
-        item.region = m_conical_region;
+        item.region = item.support ? nullptr : m_conical_region;
         item.layer = m_layer;
         item.instance_idx = m_current_instance.instance_idx;
         item.extruder_id = m_writer.extruder()->id();
@@ -652,7 +653,12 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
 
     std::stable_sort(m_conical_queue.begin(), m_conical_queue.end(),
                      [](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
-                     { return a.band < b.band; });
+                     {
+                         if (a.band != b.band)
+                             return a.band < b.band;
+                         // Supports at this height print before the object that sits on them.
+                         return a.support && !b.support;
+                     });
 
     std::string gcode;
     gcode.reserve(m_conical_queue.size() * 64);
@@ -784,11 +790,34 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 this->set_origin(item.origin);
             if (item.object != nullptr)
                 m_current_instance = {item.object, item.instance_idx};
-
-            for (Geometry::ArcWelder::Segment &seg : item.path)
+            // Object moves were queued without their exclude-object markers. The collection
+            // pass already pointed the labeler at this instance, so emit the start here,
+            // where the moves are actually written.
+            if (item.object != nullptr && item.instance_idx >= 0 &&
+                size_t(item.instance_idx) < item.object->instances().size())
             {
-                const double z = seg.height_fraction;
-                seg.height_fraction = float(1. + (z - layer_z) / layer_h);
+                this->m_label_objects.update(&item.object->instances()[size_t(item.instance_idx)]);
+                gcode += this->m_label_objects.maybe_change_instance(m_writer);
+            }
+
+            // Support is a flat layer at the Z it was sliced. Encoding it into the band's
+            // slope scale shifts that Z, because extrusion then measures height as the bead.
+            const float saved_layer_z = m_last_layer_z;
+            const float saved_height = m_last_height;
+            if (item.support)
+            {
+                const double z = item.path.front().height_fraction;
+                for (Geometry::ArcWelder::Segment &seg : item.path)
+                    seg.height_fraction = 1.f;
+                m_last_layer_z = float(z);
+            }
+            else
+            {
+                for (Geometry::ArcWelder::Segment &seg : item.path)
+                {
+                    const double z = seg.height_fraction;
+                    seg.height_fraction = float(1. + (z - layer_z) / layer_h);
+                }
             }
 
             struct Guard
@@ -798,6 +827,11 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
                 ~Guard() { flag = false; }
             } guard{m_conical_rewrite};
             gcode += this->_extrude(item.attributes, item.path, item.description, item.speed, item.emit_modifiers);
+            if (item.support)
+            {
+                m_last_layer_z = saved_layer_z;
+                m_last_height = saved_height;
+            }
         }
         index = end;
     }

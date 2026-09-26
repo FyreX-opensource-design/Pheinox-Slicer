@@ -695,13 +695,135 @@ void PrintObject::generate_support_spots()
     }
 }
 
+namespace
+{
+ExPolygons unwarped_layer_outline(const std::vector<ExPolygons> &regions)
+{
+    ExPolygons all;
+    for (const ExPolygons &region : regions)
+        append(all, region);
+    return all.empty() ? ExPolygons{} : union_ex(all);
+}
+
+void classify_unwarped_region(SurfaceCollection &dst, const ExPolygons &polys, const ExPolygons &above,
+                              const ExPolygons &below)
+{
+    dst.clear();
+    if (polys.empty())
+        return;
+    ExPolygons top = above.empty() ? polys : diff_ex(polys, above);
+    ExPolygons covered = above.empty() ? ExPolygons{} : intersection_ex(polys, above);
+    ExPolygons bottom;
+    ExPolygons internal;
+    if (!covered.empty())
+    {
+        if (below.empty())
+            bottom = std::move(covered);
+        else
+        {
+            bottom = diff_ex(covered, below);
+            internal = intersection_ex(covered, below);
+        }
+    }
+    if (!top.empty())
+        dst.append(std::move(top), stTop);
+    if (!internal.empty())
+        dst.append(std::move(internal), stInternal);
+    if (!bottom.empty())
+        dst.append(std::move(bottom), stBottom);
+}
+} // namespace
+
 void PrintObject::generate_support_material()
 {
     if (this->set_started(posSupportMaterial))
     {
         this->clear_support_layers();
+        // Holds the cone slices aside while supports are built from the original outlines.
+        struct OriginalSliceScope
+        {
+            PrintObject &object;
+            bool active{false};
+            std::vector<ExPolygons> lslices;
+            std::vector<LayerSlices> lslices_ex;
+            std::vector<std::vector<Surfaces>> regions;
+
+            explicit OriginalSliceScope(PrintObject &object) : object(object) {}
+            OriginalSliceScope(const OriginalSliceScope &) = delete;
+            ~OriginalSliceScope() { this->restore(); }
+
+            void install()
+            {
+                const std::vector<std::vector<ExPolygons>> &unwarped = object.m_unwarped_region_slices;
+                if (object.conical_slicing_mode() == ConicalSlicing::Off || unwarped.size() != object.m_layers.size())
+                    return;
+                const size_t nlayers = object.m_layers.size();
+                std::vector<ExPolygons> outlines(nlayers);
+                for (size_t i = 0; i < nlayers; ++i)
+                    outlines[i] = unwarped_layer_outline(unwarped[i]);
+
+                lslices.resize(nlayers);
+                lslices_ex.resize(nlayers);
+                regions.resize(nlayers);
+                for (size_t i = 0; i < nlayers; ++i)
+                {
+                    Layer &layer = *object.m_layers[i];
+                    lslices[i] = layer.lslices;
+                    lslices_ex[i] = layer.lslices_ex;
+                    regions[i].resize(layer.region_count());
+                    for (size_t r = 0; r < layer.region_count(); ++r)
+                        regions[i][r] = layer.get_region(int(r))->m_slices.surfaces;
+                }
+                active = true;
+
+                for (size_t i = 0; i < nlayers; ++i)
+                {
+                    Layer &layer = *object.m_layers[i];
+                    layer.lslices = outlines[i];
+                    layer.lslices_ex.clear();
+                    layer.lslices_ex.reserve(outlines[i].size());
+                    for (const ExPolygon &island : outlines[i])
+                        layer.lslices_ex.push_back(LayerSlice{get_extents(island)});
+
+                    const ExPolygons &above = i + 1 < nlayers ? outlines[i + 1] : outlines[i];
+                    const ExPolygons &below = i > 0 ? outlines[i - 1] : outlines[i];
+                    const bool top_layer = i + 1 == nlayers || outlines[i + 1].empty();
+                    const bool bottom_layer = i == 0 || outlines[i - 1].empty();
+                    const size_t nregions = std::min(layer.region_count(), unwarped[i].size());
+                    for (size_t r = 0; r < layer.region_count(); ++r)
+                    {
+                        SurfaceCollection &dst = layer.get_region(int(r))->m_slices;
+                        if (r < nregions)
+                            classify_unwarped_region(dst, unwarped[i][r], top_layer ? ExPolygons{} : above,
+                                                     bottom_layer ? ExPolygons{} : below);
+                        else
+                            dst.clear();
+                    }
+                }
+            }
+
+            void restore()
+            {
+                if (!active)
+                    return;
+                active = false;
+                const size_t nlayers = std::min(object.m_layers.size(), lslices.size());
+                for (size_t i = 0; i < nlayers; ++i)
+                {
+                    Layer &layer = *object.m_layers[i];
+                    layer.lslices = std::move(lslices[i]);
+                    layer.lslices_ex = std::move(lslices_ex[i]);
+                    const size_t nregions = std::min(layer.region_count(), regions[i].size());
+                    for (size_t r = 0; r < nregions; ++r)
+                        layer.get_region(int(r))->m_slices.surfaces = std::move(regions[i][r]);
+                }
+            }
+        };
+
         if ((this->has_support() && m_layers.size() > 1) || (this->has_raft() && !m_layers.empty()))
         {
+            OriginalSliceScope original_slices{*this};
+            original_slices.install();
             const float total = g_progress_config.slicing.total_with_conditionals(false, true, false, false, false);
             const float accum_start = g_progress_config.slicing.prepare_layers +
                                       g_progress_config.slicing.slice_volumes +
