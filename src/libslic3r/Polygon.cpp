@@ -794,9 +794,17 @@ bool contains(const Polygons &polygons, const Point &p, bool border_result)
 
 Polygon make_circle(double radius, double error)
 {
-    double angle = 2. * acos(1. - error / radius);
-    size_t num_segments = size_t(ceil(2. * M_PI / angle));
-    return make_circle_num_segments(radius, num_segments);
+    // error >= radius makes acos() return NaN. The segment count then overflows
+    // vector::reserve. Conical in asks for circles smaller than the 0.15 mm tolerance.
+    if (!(radius > 0.) || !std::isfinite(radius))
+        return {};
+    if (!(error > 0.) || !std::isfinite(error) || error >= radius)
+        error = radius * 0.5;
+    const double angle = 2. * std::acos(1. - error / radius);
+    if (!(angle > 1e-9) || !std::isfinite(angle))
+        return make_circle_num_segments(radius, 3);
+    const size_t num_segments = std::min(size_t(std::ceil(2. * M_PI / angle)), size_t(100000));
+    return make_circle_num_segments(radius, std::max(num_segments, size_t(3)));
 }
 
 Polygon make_circle_num_segments(double radius, size_t num_segments)
