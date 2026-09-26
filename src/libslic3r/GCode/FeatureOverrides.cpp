@@ -673,11 +673,31 @@ std::string GCodeGenerator::flush_conical_bands(const Print &print)
     // apart still print lower first, so the flat region is not buried under the cone.
     const double z_quantum = std::max(0.05, m_conical_grid.ready ? m_conical_grid.layer_height
                                                                  : m_config.layer_height.value);
+    // Finish this band on one object before traveling to the next. Queue order otherwise
+    // alternates objects on every source layer, so the nozzle hops across the plate.
+    std::vector<std::pair<const PrintObject *, int>> object_order;
+    object_order.reserve(8);
+    for (const ConicalQueuedExtrusion &item : m_conical_queue)
+    {
+        const std::pair<const PrintObject *, int> key{item.object, item.instance_idx};
+        if (std::find(object_order.begin(), object_order.end(), key) == object_order.end())
+            object_order.push_back(key);
+    }
+    auto object_index = [&object_order](const ConicalQueuedExtrusion &item)
+    {
+        const std::pair<const PrintObject *, int> key{item.object, item.instance_idx};
+        return int(std::find(object_order.begin(), object_order.end(), key) - object_order.begin());
+    };
     std::stable_sort(m_conical_queue.begin(), m_conical_queue.end(),
-                     [mixed_horizontal, z_quantum](const ConicalQueuedExtrusion &a, const ConicalQueuedExtrusion &b)
+                     [mixed_horizontal, z_quantum, &object_index](const ConicalQueuedExtrusion &a,
+                                                                 const ConicalQueuedExtrusion &b)
                      {
                          if (a.band != b.band)
                              return a.band < b.band;
+                         const int oa = object_index(a);
+                         const int ob = object_index(b);
+                         if (oa != ob)
+                             return oa < ob;
                          if (mixed_horizontal)
                          {
                              const int qa = int(std::floor((double(a.z_key) + 1e-4) / z_quantum));
