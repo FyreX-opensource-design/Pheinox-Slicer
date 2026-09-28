@@ -809,6 +809,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
         toggle_field("conical_angle", conical_on);
         toggle_field("conical_slice_height", conical_on);
     }
+    const bool inner_wave = have_perimeters && std::abs(config->opt_float("inner_wall_wave_amplitude")) > 1e-6;
+    toggle_field("inner_wall_wave_amplitude", have_perimeters);
+    toggle_field("inner_wall_wave_frequency", inner_wave);
+    toggle_field("inner_wall_wave_phase", inner_wave);
     toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
 
     if (config->option("feature_temp_wait") != nullptr)
@@ -838,6 +842,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     }
 
     const bool have_infill = config->option<ConfigOptionPercent>("fill_density")->value > 0;
+    const bool infill_wave = have_infill && std::abs(config->opt_float("infill_wave_amplitude")) > 1e-6;
+    toggle_field("infill_wave_amplitude", have_infill);
+    toggle_field("infill_wave_frequency", infill_wave);
+    toggle_field("infill_wave_phase", infill_wave);
     const bool has_automatic_infill_combination =
         config->option<ConfigOptionBool>("automatic_infill_combination")->value;
     // infill_extruder uses the same logic as in Print::extruders()
@@ -963,6 +971,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     // interlock_perimeter_strength hidden - forced to 100% in code
     toggle_field("interlock_perimeter_overlap", interlock_enabled);
     toggle_field("interlock_flow_detection", interlock_enabled);
+    toggle_field("interlock_wave_amplitude", interlock_enabled);
+    const bool interlock_wave = interlock_enabled && std::abs(config->opt_float("interlock_wave_amplitude")) > 1e-6;
+    toggle_field("interlock_wave_frequency", interlock_wave);
+    toggle_field("interlock_wave_phase", interlock_wave);
 
     // Clamp interlock_regular_perimeters to not exceed perimeters
     if (interlock_enabled)

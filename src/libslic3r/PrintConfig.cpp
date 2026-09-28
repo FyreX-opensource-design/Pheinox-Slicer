@@ -1507,6 +1507,39 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("inner_wall_wave_amplitude", coFloat);
+    def->label = L("Inner wall wave");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Move inner walls up and down in a sine wave along X. 0 leaves them flat. "
+                     "The outer wall is not waved. The wave fades out at the top and bottom of the object "
+                     "so it does not break through the skin. Frequency and phase are set below.");
+    def->sidetext = L("mm");
+    def->min = -2;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("inner_wall_wave_frequency", coFloat);
+    def->label = L("Inner wall wave frequency");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("How tightly the inner-wall wave repeats along X, in radians per millimetre. "
+                     "1.1 is about one wave every 6 mm.");
+    def->sidetext = L("rad/mm");
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.1));
+
+    def = this->add("inner_wall_wave_phase", coFloat);
+    def->label = L("Inner wall wave phase");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Shifts the inner-wall wave along X. 180° flips the wave over.");
+    def->sidetext = L("°");
+    def->min = -360;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("zaa_enabled", coBool);
     def->label = L("Z anti-aliasing");
     def->category = L("Layers and Perimeters");
@@ -2349,6 +2382,40 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = L("°");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("infill_wave_amplitude", coFloat);
+    def->label = L("Infill wave");
+    def->category = L("Infill");
+    def->tooltip = L("Move sparse infill up and down in a sine wave along X. 0 leaves it flat. "
+                     "Solid, top, and bridge infill stay flat. The wave fades out at the top and bottom "
+                     "of the object. Frequency and phase are set below.");
+    def->sidetext = L("mm");
+    def->min = -2;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("infill_wave_frequency", coFloat);
+    def->label = L("Infill wave frequency");
+    def->category = L("Infill");
+    def->tooltip = L("How tightly the infill wave repeats along X, in radians per millimetre. "
+                     "1.1 is about one wave every 6 mm.");
+    def->sidetext = L("rad/mm");
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.1));
+
+    def = this->add("infill_wave_phase", coFloat);
+    def->label = L("Infill wave phase");
+    def->category = L("Infill");
+    def->tooltip = L("Shifts the infill wave along X. A different phase from the walls "
+                     "keeps the infill from stacking on the same slope.");
+    def->sidetext = L("°");
+    def->min = -360;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("solid_fill_pattern", coEnum);
     def->label = L("Solid fill pattern");
@@ -4040,6 +4107,40 @@ void PrintConfigDef::init_fff_params()
     def->width = 10; // Fit dropdown text
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InterlockFlowDetection>(ifdStandard));
+
+    def = this->add("interlock_wave_amplitude", coFloat);
+    def->label = L("Interlock wave");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Move interlocking perimeters up and down in a sine wave along X. 0 leaves them flat. "
+                     "This wave is separate from the inner-wall wave. It fades out at the top and bottom "
+                     "of the object. Frequency and phase are set below.");
+    def->sidetext = L("mm");
+    def->min = -2;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("interlock_wave_frequency", coFloat);
+    def->label = L("Interlock wave frequency");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("How tightly the interlocking wave repeats along X, in radians per millimetre. "
+                     "1.1 is about one wave every 6 mm.");
+    def->sidetext = L("rad/mm");
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.1));
+
+    def = this->add("interlock_wave_phase", coFloat);
+    def->label = L("Interlock wave phase");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Shifts the interlocking wave along X. A different phase from the inner walls "
+                     "keeps the two waves from stacking on the same slope.");
+    def->sidetext = L("°");
+    def->min = -360;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("post_process", coStrings);
     def->label = L("Post-processing scripts");

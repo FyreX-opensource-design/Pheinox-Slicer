@@ -1708,6 +1708,9 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         auto *layer_group = CreateFlatStaticBoxSizer(content, _L("Layer height"));
         CreateSettingRow(content, layer_group, "layer_height", _L("Layer height"));
         CreateSettingRow(content, layer_group, "outer_wall_layer_height", _L("Outer wall layer height"));
+        CreateSettingRow(content, layer_group, "inner_wall_wave_amplitude", _L("Inner wall wave"));
+        CreateSettingRow(content, layer_group, "inner_wall_wave_frequency", _L("Inner wall wave frequency"));
+        CreateSettingRow(content, layer_group, "inner_wall_wave_phase", _L("Inner wall wave phase"));
         CreateSettingRow(content, layer_group, "outer_wall_slope_antialiasing", _L("Antialias sloped outer walls"));
         CreateSettingRow(content, layer_group, "zaa_enabled", _L("Z anti-aliasing"));
         CreateSettingRow(content, layer_group, "zaa_min_height", _L("Minimum Z height"));
@@ -1763,6 +1766,9 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         CreateSettingRow(content, interlock_group, "interlock_solid_layers_bottom", _L("Solid layers below"));
         CreateSettingRow(content, interlock_group, "interlock_perimeter_overlap", _L("Interlock perimeter overlap"));
         CreateSettingRow(content, interlock_group, "interlock_flow_detection", _L("Interlock flow detection"));
+        CreateSettingRow(content, interlock_group, "interlock_wave_amplitude", _L("Interlock wave"));
+        CreateSettingRow(content, interlock_group, "interlock_wave_frequency", _L("Interlock wave frequency"));
+        CreateSettingRow(content, interlock_group, "interlock_wave_phase", _L("Interlock wave phase"));
         sizer->Add(interlock_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -1883,6 +1889,9 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
         CreateSettingRow(content, infill_group, "bottom_fill_pattern", _L("Bottom fill pattern"));
         CreateSettingRow(content, infill_group, "infill_anchor", _L("Infill anchor length"));
         CreateSettingRow(content, infill_group, "infill_anchor_max", _L("Infill anchor max length"));
+        CreateSettingRow(content, infill_group, "infill_wave_amplitude", _L("Infill wave"));
+        CreateSettingRow(content, infill_group, "infill_wave_frequency", _L("Infill wave frequency"));
+        CreateSettingRow(content, infill_group, "infill_wave_phase", _L("Infill wave phase"));
         sizer->Add(infill_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -3136,6 +3145,10 @@ void PrintSettingsPanel::ApplyToggleLogic()
     // Infill dependencies
     bool have_infill = config.option<ConfigOptionPercent>("fill_density")->value > 0;
     bool has_automatic_infill_combination = config.option<ConfigOptionBool>("automatic_infill_combination")->value;
+    const bool infill_wave = have_infill && std::abs(config.opt_float("infill_wave_amplitude")) > 1e-6;
+    ToggleOption("infill_wave_amplitude", have_infill);
+    ToggleOption("infill_wave_frequency", infill_wave);
+    ToggleOption("infill_wave_phase", infill_wave);
     for (const char *el : {"fill_pattern", "solid_infill_every_layers", "solid_infill_below_area", "infill_extruder",
                            "infill_anchor_max", "automatic_infill_combination"})
         ToggleOption(el, have_infill);

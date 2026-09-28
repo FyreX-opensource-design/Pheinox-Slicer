@@ -1077,7 +1077,9 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, overhang_speed_2))((ConfigOptionFloatOrPercent, overhang_speed_3))(
         (ConfigOptionBool, external_perimeters_first))((ConfigOptionFloat, outer_wall_layer_height))(
         (ConfigOptionEnum<ConicalSlicing>, conical_slicing))((ConfigOptionFloat, conical_angle))(
-            (ConfigOptionFloat, conical_slice_height))((ConfigOptionBool, outer_wall_slope_antialiasing))(
+            (ConfigOptionFloat, conical_slice_height))((ConfigOptionFloat, inner_wall_wave_amplitude))(
+            (ConfigOptionFloat, inner_wall_wave_frequency))((ConfigOptionFloat, inner_wall_wave_phase))(
+            (ConfigOptionBool, outer_wall_slope_antialiasing))(
         (ConfigOptionBool, zaa_enabled))(
         (ConfigOptionFloat, zaa_min_height))((ConfigOptionBool, extra_perimeters))(
         (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(
@@ -1093,7 +1095,9 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionString, custom_infill_equations))((ConfigOptionString, custom_infill_file))(
         (ConfigOptionFloat, custom_infill_tile_size))((ConfigOptionFloat, custom_infill_threshold))(
         (ConfigOptionFloat, custom_infill_value_min))((ConfigOptionFloat, custom_infill_value_max))(
-        (ConfigOptionFloat, custom_infill_angle))((ConfigOptionEnum<FuzzySkinType>, fuzzy_skin))(
+        (ConfigOptionFloat, custom_infill_angle))((ConfigOptionFloat, infill_wave_amplitude))(
+            (ConfigOptionFloat, infill_wave_frequency))((ConfigOptionFloat, infill_wave_phase))(
+            (ConfigOptionEnum<FuzzySkinType>, fuzzy_skin))(
         (ConfigOptionFloat, fuzzy_skin_thickness))((ConfigOptionFloat, fuzzy_skin_point_dist))(
         (ConfigOptionBool, fuzzy_skin_first_layer))((ConfigOptionEnum<FuzzySkinNoiseType>, fuzzy_skin_noise_type))(
         (ConfigOptionEnum<FuzzySkinMode>, fuzzy_skin_mode))((ConfigOptionFloat, fuzzy_skin_scale))(
@@ -1113,7 +1117,9 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionInt, interlock_regular_perimeters))((ConfigOptionInt, interlock_solid_layers_top))(
         (ConfigOptionInt, interlock_solid_layers_bottom))((ConfigOptionPercent, interlock_perimeter_strength))(
         (ConfigOptionFloatOrPercent, interlock_perimeter_overlap))((ConfigOptionInt, interlocking_perimeter_extruder))(
-        (ConfigOptionEnum<InterlockFlowDetection>, interlock_flow_detection))
+        (ConfigOptionEnum<InterlockFlowDetection>, interlock_flow_detection))(
+        (ConfigOptionFloat, interlock_wave_amplitude))((ConfigOptionFloat, interlock_wave_frequency))(
+        (ConfigOptionFloat, interlock_wave_phase))
     // Serpentine fill
     ((ConfigOptionBool, serpentine_enabled))((ConfigOptionFloatOrPercent, serpentine_extrusion_width))(
         (ConfigOptionFloatOrPercent, serpentine_overlap))((ConfigOptionPercent, serpentine_max_bead))(

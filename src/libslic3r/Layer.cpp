@@ -795,6 +795,12 @@ inline bool has_compatible_layer_regions(const PrintRegionConfig &config, const 
            config.outer_wall_layer_height == other_config.outer_wall_layer_height &&
            config.outer_wall_slope_antialiasing == other_config.outer_wall_slope_antialiasing &&
            config.zaa_enabled == other_config.zaa_enabled && config.zaa_min_height == other_config.zaa_min_height &&
+           config.inner_wall_wave_amplitude == other_config.inner_wall_wave_amplitude &&
+           config.inner_wall_wave_frequency == other_config.inner_wall_wave_frequency &&
+           config.inner_wall_wave_phase == other_config.inner_wall_wave_phase &&
+           config.interlock_wave_amplitude == other_config.interlock_wave_amplitude &&
+           config.interlock_wave_frequency == other_config.interlock_wave_frequency &&
+           config.interlock_wave_phase == other_config.interlock_wave_phase &&
            config.infill_overlap == other_config.infill_overlap &&
            has_compatible_dynamic_overhang_speed(config, other_config);
 }

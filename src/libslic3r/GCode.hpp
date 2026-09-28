@@ -526,6 +526,16 @@ private:
     ConicalBand conical_band(const Point &point) const;
     static double conical_dz(const ConicalBand &band, const Point &point);
     double conical_z_offset_mm(const Point &point) const;
+    // Sine wave along X for inner walls and interlocking perimeters. Amplitude 0 is off.
+    struct ZWave
+    {
+        double amplitude{0.};
+        double frequency{0.};
+        double phase{0.};
+        bool active() const { return amplitude != 0. && frequency != 0.; }
+    };
+    ZWave z_wave_for_role(const ExtrusionRole &role) const;
+    double z_wave_offset_mm(const ZWave &wave, double x_mm, double z_mm) const;
     bool rewrite_conical_path(const Geometry::ArcWelder::Path &in, double height_mm,
                               Geometry::ArcWelder::Path &out) const;
     bool m_conical_rewrite{false};

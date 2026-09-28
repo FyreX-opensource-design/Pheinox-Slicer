@@ -122,6 +122,10 @@ struct SurfaceFillParams
     int conical_mode = 0;
     float conical_angle = 45.f;
     float conical_slice_height = 0.f;
+    // A different infill wave must not share one fill, or the other region is extruded with the first wave.
+    float infill_wave_amplitude = 0.f;
+    float infill_wave_frequency = 0.f;
+    float infill_wave_phase = 0.f;
 
     bool operator<(const SurfaceFillParams &rhs) const
     {
@@ -155,6 +159,9 @@ struct SurfaceFillParams
         RETURN_COMPARE_NON_EQUAL(conical_mode);
         RETURN_COMPARE_NON_EQUAL(conical_angle);
         RETURN_COMPARE_NON_EQUAL(conical_slice_height);
+        RETURN_COMPARE_NON_EQUAL(infill_wave_amplitude);
+        RETURN_COMPARE_NON_EQUAL(infill_wave_frequency);
+        RETURN_COMPARE_NON_EQUAL(infill_wave_phase);
         RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, pattern);
         RETURN_COMPARE_NON_EQUAL(spacing);
         RETURN_COMPARE_NON_EQUAL(overlap);
@@ -174,6 +181,9 @@ struct SurfaceFillParams
     {
         return this->extruder == rhs.extruder && this->conical_mode == rhs.conical_mode &&
                this->conical_angle == rhs.conical_angle && this->conical_slice_height == rhs.conical_slice_height &&
+               this->infill_wave_amplitude == rhs.infill_wave_amplitude &&
+               this->infill_wave_frequency == rhs.infill_wave_frequency &&
+               this->infill_wave_phase == rhs.infill_wave_phase &&
                this->pattern == rhs.pattern && this->spacing == rhs.spacing &&
                this->overlap == rhs.overlap && this->angle == rhs.angle && this->bridge == rhs.bridge &&
                //				this->bridge_angle 		== rhs.bridge_angle		&&
@@ -446,6 +456,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                 params.conical_mode = int(region_config.conical_slicing.value);
                 params.conical_angle = float(region_config.conical_angle.value);
                 params.conical_slice_height = float(region_config.conical_slice_height.value);
+                params.infill_wave_amplitude = float(region_config.infill_wave_amplitude.value);
+                params.infill_wave_frequency = float(region_config.infill_wave_frequency.value);
+                params.infill_wave_phase = float(region_config.infill_wave_phase.value);
                 FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill
                                                            : (surface.is_solid() ? frSolidInfill : frInfill);
                 bool is_bridge = layer.id() > 0 && surface.is_bridge();

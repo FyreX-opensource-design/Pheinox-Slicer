@@ -1984,6 +1984,9 @@ void TabPrint::build()
     // interlock_perimeter_strength hidden - forced to 100% in code, overlap handles bonding
     optgroup->append_single_option_line("interlock_perimeter_overlap", category_path + "interlock-overlap");
     optgroup->append_single_option_line("interlock_flow_detection", category_path + "interlock-flow-detection");
+    optgroup->append_single_option_line("interlock_wave_amplitude", category_path + "interlock-wave");
+    optgroup->append_single_option_line("interlock_wave_frequency", category_path + "interlock-wave");
+    optgroup->append_single_option_line("interlock_wave_phase", category_path + "interlock-wave");
 
     line = Line{"", ""};
     line.full_width = 1;
@@ -2047,6 +2050,9 @@ void TabPrint::build()
     optgroup->append_single_option_line("conical_slicing", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("conical_angle", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("conical_slice_height", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("inner_wall_wave_amplitude", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("inner_wall_wave_frequency", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("inner_wall_wave_phase", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("outer_wall_slope_antialiasing", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("zaa_enabled", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("zaa_min_height", category_path + "outer-wall-layer-height");
@@ -2110,6 +2116,9 @@ void TabPrint::build()
     optgroup->append_single_option_line("bottom_fill_pattern", category_path + "bottom-fill-pattern");
     optgroup->append_single_option_line("infill_anchor", category_path + "fill-pattern");
     optgroup->append_single_option_line("infill_anchor_max", category_path + "fill-pattern");
+    optgroup->append_single_option_line("infill_wave_amplitude", category_path + "infill-wave");
+    optgroup->append_single_option_line("infill_wave_frequency", category_path + "infill-wave");
+    optgroup->append_single_option_line("infill_wave_phase", category_path + "infill-wave");
 
     optgroup = page->new_optgroup_for_sidebar(L("Ironing"));
     category_path = "ironing_177488#";

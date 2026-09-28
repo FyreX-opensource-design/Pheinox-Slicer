@@ -1324,7 +1324,12 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
         {
             steps.emplace_back(posSlice);
         }
-        else if (opt_key == "conical_slice_height" ||
+        else if (opt_key == "conical_slice_height" || opt_key == "inner_wall_wave_amplitude" ||
+                 opt_key == "inner_wall_wave_frequency" || opt_key == "inner_wall_wave_phase" ||
+                 opt_key == "infill_wave_amplitude" || opt_key == "infill_wave_frequency" ||
+                 opt_key == "infill_wave_phase" ||
+                 opt_key == "interlock_wave_amplitude" || opt_key == "interlock_wave_frequency" ||
+                 opt_key == "interlock_wave_phase" ||
                  opt_key == "outer_wall_layer_height" || opt_key == "outer_wall_slope_antialiasing" ||
                  opt_key == "zaa_enabled" || opt_key == "zaa_min_height" ||
                  opt_key == "seam_position" ||

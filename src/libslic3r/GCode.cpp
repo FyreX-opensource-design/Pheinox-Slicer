@@ -6083,6 +6083,46 @@ double cap_speed(double speed, const FullPrintConfig &config, int extruder_id, c
     return speed;
 }
 
+GCodeGenerator::ZWave GCodeGenerator::z_wave_for_role(const ExtrusionRole &role) const
+{
+    ZWave wave;
+    const auto load = [&](double amplitude, double frequency, double phase_deg)
+    {
+        wave.amplitude = amplitude;
+        wave.frequency = frequency;
+        wave.phase = phase_deg * 0.017453292519943295;
+    };
+    if (role == ExtrusionRole::InterlockingPerimeter)
+        load(m_config.interlock_wave_amplitude.value, m_config.interlock_wave_frequency.value,
+             m_config.interlock_wave_phase.value);
+    else if (role == ExtrusionRole::Perimeter)
+        load(m_config.inner_wall_wave_amplitude.value, m_config.inner_wall_wave_frequency.value,
+             m_config.inner_wall_wave_phase.value);
+    else if (role == ExtrusionRole::InternalInfill)
+        load(m_config.infill_wave_amplitude.value, m_config.infill_wave_frequency.value,
+             m_config.infill_wave_phase.value);
+    return wave;
+}
+
+double GCodeGenerator::z_wave_offset_mm(const ZWave &wave, const double x_mm, const double z_mm) const
+{
+    if (!wave.active())
+        return 0.;
+    double scale = 1.;
+    if (m_layer != nullptr && m_layer->object() != nullptr && !m_layer->object()->layers().empty())
+    {
+        const auto &layers = m_layer->object()->layers();
+        const double z0 = layers.front()->bottom_z();
+        const double z1 = layers.back()->print_z;
+        const double span = z1 - z0;
+        if (span > 1e-3)
+            scale = std::clamp(std::min(z_mm - z0, z1 - z_mm) / (0.5 * span), 0., 1.);
+        else
+            scale = 0.;
+    }
+    return wave.amplitude * scale * std::sin(wave.frequency * x_mm + wave.phase);
+}
+
 std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const Geometry::ArcWelder::Path &path,
                                      const std::string_view description, double speed,
                                      const EmitModifiers &emit_modifiers)
@@ -6140,6 +6180,11 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     if (use_wave_travel)
         m_writer.set_travel_speed_override(m_config.wave_overhang_travel_speed.value);
 
+    const ZWave z_wave = this->z_wave_for_role(path_attr.role);
+    const auto waved_z = [this, &z_wave](double x_mm, double z_mm)
+    { return z_mm + this->z_wave_offset_mm(z_wave, x_mm, z_mm); };
+    const Vec2d front_xy = this->point_to_gcode(path.front().point);
+
     const auto conical_z = [this, &path_attr](float height_fraction)
     {
         // m_last_height is still the band span when a travel is planned. The queued
@@ -6154,8 +6199,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         const std::string comment{"move to print after unknown position"};
         gcode += this->retract_and_wipe();
         gcode += m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer);
-        gcode += this->m_writer.travel_to_xy(this->point_to_gcode(path.front().point), comment);
-        gcode += this->m_writer.travel_to_z_force(z, comment);
+        gcode += this->m_writer.travel_to_xy(front_xy, comment);
+        gcode += this->m_writer.travel_to_z_force(waved_z(front_xy.x(), z), comment);
     }
     else if (this->last_position != path.front().point)
     {
@@ -6165,9 +6210,15 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         comment += " point";
         // A cone move does not sit on m_last_layer_z. Starting the travel there
         // lifts the nozzle to the top of the band between every fragment.
-        const double from_z = m_conical_rewrite ? this->m_writer.get_position().z() : double(this->m_last_layer_z);
+        const double writer_z = this->m_writer.get_position().z();
+        // A cone or a Z wave does not sit on the layer. Starting the travel on the layer
+        // lifts the nozzle off the path it just printed.
+        const double from_z = (m_conical_rewrite || std::abs(writer_z - double(this->m_last_layer_z)) > 1e-4) ?
+                                  writer_z :
+                                  double(this->m_last_layer_z);
         const Vec3crd from{to_3d(*this->last_position, scaled(from_z))};
-        const Vec3crd to{to_3d(path.front().point, scaled(conical_z(path.front().height_fraction)))};
+        const Vec3crd to{to_3d(path.front().point,
+                               scaled(waved_z(front_xy.x(), conical_z(path.front().height_fraction))))};
         const std::string travel_gcode{this->travel_to(
             from, to, path_attr.role, comment,
             [this]() { return m_writer.multiple_extruders ? "" : m_label_objects.maybe_change_instance(m_writer); })};
@@ -6175,7 +6226,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     }
     else if (std::abs(path.front().height_fraction - 1.f) > 1e-4f)
     {
-        gcode += this->m_writer.travel_to_z(conical_z(path.front().height_fraction), "contour z");
+        gcode += this->m_writer.travel_to_z(waved_z(front_xy.x(), conical_z(path.front().height_fraction)), "contour z");
     }
 
     if (use_wave_travel)
@@ -7022,6 +7073,27 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         comment = description;
         comment += description_bridge;
     }
+    // Split a move into about 1 mm steps and add the sine. A flat move stays one G1.
+    auto emit_z = [&](const Vec2d &from, const Vec2d &to, double z0, double z1, double extrusion, const std::string &cmt)
+    {
+        if (!z_wave.active())
+        {
+            if (std::abs(z1 - double(m_last_layer_z)) > 1e-4 || std::abs(z0 - double(m_last_layer_z)) > 1e-4)
+                gcode += m_writer.extrude_to_xyz(Vec3d(to.x(), to.y(), z1), extrusion, cmt);
+            else
+                gcode += m_writer.extrude_to_xy(to, extrusion, cmt);
+            return;
+        }
+        const double len = std::max(1e-6, (to - from).norm());
+        const int pieces = std::max(1, int(std::ceil(len)));
+        for (int i = 1; i <= pieces; ++i)
+        {
+            const double t = double(i) / double(pieces);
+            const Vec2d at = from + (to - from) * t;
+            const double base = z0 + (z1 - z0) * t;
+            gcode += m_writer.extrude_to_xyz(Vec3d(at.x(), at.y(), waved_z(at.x(), base)), extrusion / pieces, cmt);
+        }
+    };
     Vec2d prev_exact = this->point_to_gcode(path.front().point);
     Vec2d prev = GCodeFormatter::quantize(prev_exact);
     auto it = path.begin();
@@ -7215,7 +7287,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                             // Emit the move
                             Vec2d to_quantized = GCodeFormatter::quantize(to);
                             double extrusion = subseg_e_per_mm * subseg_length * it->e_fraction;
-                            gcode += m_writer.extrude_to_xy(to_quantized, extrusion, subseg_comment);
+                            emit_z(GCodeFormatter::quantize(segment_start), to_quantized, double(m_last_layer_z),
+                                   double(m_last_layer_z), extrusion, subseg_comment);
                         };
 
                         // Process each crossing
@@ -7263,19 +7336,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                         }
 
                         double extrusion_amount{segment_e_per_mm * line_length * it->e_fraction};
-                        if (std::abs(it->height_fraction - 1.f) > 1e-4f ||
-                            std::abs(std::prev(it)->height_fraction - 1.f) > 1e-4f)
-                        {
-                            const double z_scale = (m_conical_rewrite && path_attr.height > 1e-6f) ? double(path_attr.height)
-                                                                                                   : double(m_last_height);
-                            const Vec3d destination{
-                                to_3d(p, this->m_last_layer_z + (it->height_fraction - 1) * z_scale)};
-                            gcode += m_writer.extrude_to_xyz(destination, extrusion_amount);
-                        }
-                        else
-                        {
-                            gcode += m_writer.extrude_to_xy(p, extrusion_amount, comment);
-                        }
+                        emit_z(prev, p, conical_z(std::prev(it)->height_fraction), conical_z(it->height_fraction),
+                               extrusion_amount, comment);
                     }
                 }
             }
@@ -7286,7 +7348,28 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                 const double line_length = angle * std::abs(radius);
                 const double dE = segment_e_per_mm * line_length;
                 assert(dE > 0);
-                gcode += m_writer.extrude_to_xy_G2G3IJ(p, ij, it->ccw(), dE, comment);
+                if (!z_wave.active())
+                    gcode += m_writer.extrude_to_xy_G2G3IJ(p, ij, it->ccw(), dE, comment);
+                else
+                {
+                    const Vec2d center = prev + ij;
+                    const Vec2d rel = prev - center;
+                    const double sign = it->ccw() ? 1. : -1.;
+                    const int pieces = std::max(1, int(std::ceil(line_length)));
+                    const double z0 = conical_z(std::prev(it)->height_fraction);
+                    const double z1 = conical_z(it->height_fraction);
+                    for (int i = 1; i <= pieces; ++i)
+                    {
+                        const double t = double(i) / double(pieces);
+                        const double ang = sign * angle * t;
+                        const double cs = std::cos(ang);
+                        const double sn = std::sin(ang);
+                        const Vec2d next = center + Vec2d(rel.x() * cs - rel.y() * sn, rel.x() * sn + rel.y() * cs);
+                        const double base = z0 + (z1 - z0) * t;
+                        gcode += m_writer.extrude_to_xyz(Vec3d(next.x(), next.y(), waved_z(next.x(), base)), dE / pieces,
+                                                        comment);
+                    }
+                }
             }
             prev = p;
             prev_exact = p_exact;

@@ -384,6 +384,12 @@ class Settings:
     infill_only_where_needed: str  # bool (0/1)
     infill_overlap: str  # float or percentage
     infill_speed: str  # float
+    infill_wave_amplitude: str  # float
+    infill_wave_frequency: str  # float
+    infill_wave_phase: str  # float
+    inner_wall_wave_amplitude: str  # float
+    inner_wall_wave_frequency: str  # float
+    inner_wall_wave_phase: str  # float
     interface_shells: str  # bool (0/1)
     interlock_perimeter_count: str  # int
     interlock_perimeter_overlap: str  # float or percentage
@@ -392,6 +398,9 @@ class Settings:
     interlock_regular_perimeters: str  # int
     interlock_solid_layers_bottom: str  # int
     interlock_solid_layers_top: str  # int
+    interlock_wave_amplitude: str  # float
+    interlock_wave_frequency: str  # float
+    interlock_wave_phase: str  # float
     interlocking_beam: str  # bool (0/1)
     interlocking_beam_layer_count: str  # int
     interlocking_beam_width: str  # float
