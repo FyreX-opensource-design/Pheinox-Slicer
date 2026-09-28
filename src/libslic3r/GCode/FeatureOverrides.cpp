@@ -442,14 +442,33 @@ GCodeGenerator::ConicalBand GCodeGenerator::conical_band(const Point &) const
 
     // Axis is the object's centered origin, the same origin the mesh warp used.
     // z_shift is the mesh sink plus the gap from the nozzle height down to the slice plane.
+    double angle = 45.;
+    if (m_conical_region != nullptr && m_conical_region->config().conical_slicing.value == mode)
+        angle = m_conical_region->config().conical_angle.value;
+    else
+    {
+        for (const auto &region_ref : object->all_regions())
+            if (region_ref.get().config().conical_slicing.value == mode)
+            {
+                angle = region_ref.get().config().conical_angle.value;
+                break;
+            }
+    }
+    if (!(angle > 0.) || !std::isfinite(angle))
+        angle = 45.;
+    angle = std::clamp(angle, 5., 80.);
+    const double slope = std::abs(angle - 45.) <= 1e-4 ? 1. : std::tan(angle * 0.017453292519943295);
+
+    double slice_height = 0.;
+    if (m_conical_region != nullptr)
+        slice_height = m_conical_region->config().conical_slice_height.value;
+
     band.axis = Vec2d::Zero();
     band.radius = object->conical_radius_mm();
-    const double shift = (mode == ConicalSlicing::Inward && object->conical_slicing_mixed())
-                             ? object->conical_z_shift_inward_mm()
-                             : object->conical_z_shift_mm();
-    band.z_shift = shift + (m_layer->slice_z - m_layer->print_z);
-    band.z_step = std::max(0.05, 2. * step);
+    band.z_shift = object->conical_z_shift_for(mode, angle) + (m_layer->slice_z - m_layer->print_z);
+    band.z_step = slice_height > 0. ? std::max(0.05, slice_height) : std::max(0.05, 2. * step);
     band.sign = mode == ConicalSlicing::Inward ? 1. : -1.;
+    band.slope = slope > 1e-6 ? slope : 1.;
     band.active = true;
     return band;
 }
@@ -462,10 +481,12 @@ double GCodeGenerator::conical_dz(const ConicalBand &band, const Point &point)
     // Radius in the original model. Slices were scaled back by cos(45°) after the warp.
     const double r = (at - band.axis).norm();
     // Inverse of the slice warp, so this layer lands on the original surface.
-    // Outward warp was z' = z + r - z_shift. Inward warp was z' = z + (R - r) - z_shift.
+    // Outward warp was z' = z + tan(θ) * r - z_shift.
+    // Inward warp was z' = z + tan(θ) * (R - r) - z_shift.
+    const double slope = band.slope > 1e-6 ? band.slope : 1.;
     if (band.sign < 0.)
-        return -r + band.z_shift;
-    return r - band.radius + band.z_shift;
+        return -slope * r + band.z_shift;
+    return slope * (r - band.radius) + band.z_shift;
 }
 
 double GCodeGenerator::conical_z_offset_mm(const Point &point) const
@@ -496,8 +517,9 @@ bool GCodeGenerator::rewrite_conical_path(const Geometry::ArcWelder::Path &in, c
         const Vec2d from(double(src_prev.point.x()), double(src_prev.point.y()));
         const Vec2d to(double(src.point.x()), double(src.point.y()));
         const double len_mm = unscale<double>((to - from).norm());
-        // At 45°, Z changes at most as fast as XY, so a piece this long changes Z by at most z_step.
-        const int pieces = std::max(1, int(std::ceil(len_mm / band.z_step)));
+        // Z changes by tan(θ) per millimetre of XY. Split so each piece stays within z_step.
+        const double dz_per_mm = std::max(1e-3, std::abs(band.slope));
+        const int pieces = std::max(1, int(std::ceil(len_mm * dz_per_mm / band.z_step)));
         for (int k = 1; k <= pieces; ++k)
         {
             const double u = double(k) / double(pieces);
@@ -545,10 +567,22 @@ void GCodeGenerator::ensure_conical_band_grid()
     if (m_layer != nullptr && m_layer->object() != nullptr)
         lh = m_layer->object()->config().layer_height.value;
     lh = std::max(0.05, lh);
-    // The first slice is the first layer plus one normal layer. Later slices are two normal layers.
+    double slice_height = 0.;
+    if (m_conical_region != nullptr)
+        slice_height = m_conical_region->config().conical_slice_height.value;
+    // 0 keeps the old split: first slice is the first layer plus one layer, then two layers.
     m_conical_grid.layer_height = lh;
-    m_conical_grid.first_top = m_config.z_offset.value + first_h + lh;
-    m_conical_grid.span = 2. * lh;
+    if (slice_height > 0.)
+    {
+        const double height = std::max(0.05, slice_height);
+        m_conical_grid.span = height;
+        m_conical_grid.first_top = m_config.z_offset.value + std::max(first_h, height);
+    }
+    else
+    {
+        m_conical_grid.first_top = m_config.z_offset.value + first_h + lh;
+        m_conical_grid.span = 2. * lh;
+    }
     m_conical_grid.ready = true;
 }
 
@@ -567,6 +601,22 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
         return;
     this->ensure_conical_band_grid();
 
+    double band_first = m_conical_grid.first_top;
+    double band_span = std::max(1e-4, m_conical_grid.span);
+    if (m_conical_region != nullptr && m_conical_region->config().conical_slice_height.value > 0.)
+    {
+        const double height = std::max(0.05, m_conical_region->config().conical_slice_height.value);
+        const double first_h = std::max(0.05, m_config.first_layer_height.value);
+        band_span = height;
+        band_first = m_config.z_offset.value + std::max(first_h, height);
+    }
+    auto band_index = [&](double z)
+    {
+        if (z <= band_first + 1e-4)
+            return 0;
+        return 1 + int(std::floor((z - band_first - 1e-4) / band_span));
+    };
+
     const double bead = attribs.height > 1e-6 ? double(attribs.height) : double(m_last_height);
     Geometry::ArcWelder::Path zpath = path;
     for (Geometry::ArcWelder::Segment &seg : zpath)
@@ -576,10 +626,11 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
         seg.radius = 0.f;
     }
 
-    auto band_top = [this](int band) {
+    auto band_top = [&](int band)
+    {
         if (band <= 0)
-            return m_conical_grid.first_top;
-        return m_conical_grid.first_top + band * m_conical_grid.span;
+            return band_first;
+        return band_first + band * band_span;
     };
     auto push_unique = [](Geometry::ArcWelder::Path &dst, const Geometry::ArcWelder::Segment &seg)
     {
@@ -593,7 +644,9 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
         if (piece.size() < 2)
             return;
         ConicalQueuedExtrusion item;
-        item.band = band;
+        // Key by the top of the slice, so two objects with the same thickness share a layer
+        // and a different thickness does not get mixed into that layer by band index.
+        item.band = int(std::lround(band_top(band) * 1000.));
         item.support = attribs.role.is_support();
         item.object = m_layer ? m_layer->object() : nullptr;
         item.region = item.support ? nullptr : m_conical_region;
@@ -617,13 +670,13 @@ void GCodeGenerator::queue_conical_extrusion(const ExtrusionAttributes &attribs,
     };
 
     Geometry::ArcWelder::Path current;
-    int band = conical_band_index(zpath.front().height_fraction);
+    int band = band_index(zpath.front().height_fraction);
     current.push_back(zpath.front());
     for (size_t i = 1; i < zpath.size(); ++i)
     {
         const Geometry::ArcWelder::Segment &src = zpath[i];
         const double z1 = src.height_fraction;
-        const int dest = conical_band_index(z1);
+        const int dest = band_index(z1);
         if (dest == band)
         {
             push_unique(current, src);

@@ -1473,13 +1473,39 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Layers and Perimeters");
     def->tooltip = L("Slice on a 45° cone centered on the object, then map the toolpaths back onto the "
                      "original model. Conical out prints from the middle toward the rim. Conical in prints "
-                     "from the rim toward the middle. Each move is split so Z changes by at most two layer "
-                     "heights; when outer wall layer height is set, that bead height is used for the split. "
+                     "from the rim toward the middle. Each move is then stacked into slices; the angle and "
+                     "the slice height are set below. When outer wall layer height is set and slice height is "
+                     "0, that bead height is used for the split. "
                      "Set this on an object or on a modifier. The nozzle is not tilted.");
     def->set_enum<ConicalSlicing>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
         {"off", L("Off")}, {"outward", L("Conical out")}, {"inward", L("Conical in")}});
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<ConicalSlicing>(ConicalSlicing::Off));
+
+    def = this->add("conical_angle", coFloat);
+    def->label = L("Conical angle");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Angle of the cone from horizontal, centered on the object. 45° is the default. "
+                     "Shallower angles climb less in Z for the same horizontal move. A modifier can use "
+                     "a different angle than the rest of the object. The nozzle stays vertical.");
+    def->sidetext = L("°");
+    def->min = 5;
+    def->max = 80;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(45));
+
+    def = this->add("conical_slice_height", coFloat);
+    def->label = L("Conical slice height");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Thickness of each stacked slice after the cone is mapped back onto the model. "
+                     "0 uses two layer heights, and the first slice is the first layer plus one layer. "
+                     "A set value is the height of every slice, and the first slice is at least the "
+                     "first layer height.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("zaa_enabled", coBool);
     def->label = L("Z anti-aliasing");

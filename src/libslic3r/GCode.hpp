@@ -520,6 +520,8 @@ private:
         double z_step{0.4};
         double sign{-1.};
         double z_shift{0.};
+        // tan(cone angle). 1 at the default 45°.
+        double slope{1.};
     };
     ConicalBand conical_band(const Point &point) const;
     static double conical_dz(const ConicalBand &band, const Point &point);

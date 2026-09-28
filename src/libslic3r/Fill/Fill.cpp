@@ -117,6 +117,12 @@ struct SurfaceFillParams
     // Index of this entry in a linear vector.
     size_t idx = 0;
 
+    // Regions that print on different cones must not share one fill. The fill is stored on the
+    // first region, and the other region's island then skips it.
+    int conical_mode = 0;
+    float conical_angle = 45.f;
+    float conical_slice_height = 0.f;
+
     bool operator<(const SurfaceFillParams &rhs) const
     {
 #define RETURN_COMPARE_NON_EQUAL(KEY) \
@@ -146,6 +152,9 @@ struct SurfaceFillParams
             return false; // Everything else goes after TopSolidInfill
 
         RETURN_COMPARE_NON_EQUAL(extruder);
+        RETURN_COMPARE_NON_EQUAL(conical_mode);
+        RETURN_COMPARE_NON_EQUAL(conical_angle);
+        RETURN_COMPARE_NON_EQUAL(conical_slice_height);
         RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, pattern);
         RETURN_COMPARE_NON_EQUAL(spacing);
         RETURN_COMPARE_NON_EQUAL(overlap);
@@ -163,7 +172,9 @@ struct SurfaceFillParams
 
     bool operator==(const SurfaceFillParams &rhs) const
     {
-        return this->extruder == rhs.extruder && this->pattern == rhs.pattern && this->spacing == rhs.spacing &&
+        return this->extruder == rhs.extruder && this->conical_mode == rhs.conical_mode &&
+               this->conical_angle == rhs.conical_angle && this->conical_slice_height == rhs.conical_slice_height &&
+               this->pattern == rhs.pattern && this->spacing == rhs.spacing &&
                this->overlap == rhs.overlap && this->angle == rhs.angle && this->bridge == rhs.bridge &&
                //				this->bridge_angle 		== rhs.bridge_angle		&&
                this->density == rhs.density &&
@@ -432,6 +443,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
             else
             {
                 const PrintRegionConfig &region_config = layerm.region().config();
+                params.conical_mode = int(region_config.conical_slicing.value);
+                params.conical_angle = float(region_config.conical_angle.value);
+                params.conical_slice_height = float(region_config.conical_slice_height.value);
                 FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill
                                                            : (surface.is_solid() ? frSolidInfill : frInfill);
                 bool is_bridge = layer.id() > 0 && surface.is_bridge();

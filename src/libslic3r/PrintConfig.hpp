@@ -1076,7 +1076,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, overhang_speed_0))((ConfigOptionFloatOrPercent, overhang_speed_1))(
         (ConfigOptionFloatOrPercent, overhang_speed_2))((ConfigOptionFloatOrPercent, overhang_speed_3))(
         (ConfigOptionBool, external_perimeters_first))((ConfigOptionFloat, outer_wall_layer_height))(
-        (ConfigOptionEnum<ConicalSlicing>, conical_slicing))((ConfigOptionBool, outer_wall_slope_antialiasing))(
+        (ConfigOptionEnum<ConicalSlicing>, conical_slicing))((ConfigOptionFloat, conical_angle))(
+            (ConfigOptionFloat, conical_slice_height))((ConfigOptionBool, outer_wall_slope_antialiasing))(
         (ConfigOptionBool, zaa_enabled))(
         (ConfigOptionFloat, zaa_min_height))((ConfigOptionBool, extra_perimeters))(
         (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(

@@ -212,6 +212,8 @@ class Settings:
     color_mixing_base_layers: str  # int
     colorprint_heights: str  # semicolon-separated floats
     complete_objects: str  # bool (0/1)
+    conical_angle: str  # float
+    conical_slice_height: str  # float
     cooling: str  # semicolon-separated bools
     cooling_perimeter_transition_distance: str  # semicolon-separated floats
     cooling_tube_length: str  # float

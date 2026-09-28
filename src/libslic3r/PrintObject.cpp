@@ -1145,7 +1145,7 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                 steps.emplace_back(posSlice);
             steps.emplace_back(posPerimeters);
         }
-        else if (opt_key == "layer_height" || opt_key == "conical_slicing" ||
+        else if (opt_key == "layer_height" || opt_key == "conical_slicing" || opt_key == "conical_angle" ||
                  opt_key == "mmu_segmented_region_max_width" ||
                  opt_key == "mmu_segmented_region_interlocking_depth" || opt_key == "raft_layers" ||
                  opt_key == "raft_contact_distance" || opt_key == "slice_closing_radius" || opt_key == "slicing_mode" ||
@@ -1324,7 +1324,8 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
         {
             steps.emplace_back(posSlice);
         }
-        else if (opt_key == "outer_wall_layer_height" || opt_key == "outer_wall_slope_antialiasing" ||
+        else if (opt_key == "conical_slice_height" ||
+                 opt_key == "outer_wall_layer_height" || opt_key == "outer_wall_slope_antialiasing" ||
                  opt_key == "zaa_enabled" || opt_key == "zaa_min_height" ||
                  opt_key == "seam_position" ||
                  opt_key == "scarf_seam_placement" ||

@@ -782,6 +782,8 @@ inline bool has_compatible_layer_regions(const PrintRegionConfig &config, const 
     // Different cones must stay apart. Merged perimeters are stored on one region and would
     // all be written with that region's slope.
     return config.conical_slicing == other_config.conical_slicing &&
+           config.conical_angle == other_config.conical_angle &&
+           config.conical_slice_height == other_config.conical_slice_height &&
            config.perimeter_extruder == other_config.perimeter_extruder &&
            config.perimeters == other_config.perimeters && config.perimeter_speed == other_config.perimeter_speed &&
            config.external_perimeter_speed == other_config.external_perimeter_speed &&

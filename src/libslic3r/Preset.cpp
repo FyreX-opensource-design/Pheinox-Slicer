@@ -580,6 +580,8 @@ static std::vector<std::string> s_Preset_print_options{
     "external_perimeters_first",
     "outer_wall_layer_height",
     "conical_slicing",
+    "conical_angle",
+    "conical_slice_height",
     "outer_wall_slope_antialiasing",
     "zaa_enabled",
     "zaa_min_height",

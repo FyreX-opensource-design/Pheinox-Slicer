@@ -803,6 +803,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
 
     toggle_field("outer_wall_slope_antialiasing",
                  have_perimeters && config->opt_float("outer_wall_layer_height") > 0.);
+    if (const auto *conical = config->option<ConfigOptionEnum<ConicalSlicing>>("conical_slicing"))
+    {
+        const bool conical_on = conical->value != ConicalSlicing::Off;
+        toggle_field("conical_angle", conical_on);
+        toggle_field("conical_slice_height", conical_on);
+    }
     toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
 
     if (config->option("feature_temp_wait") != nullptr)

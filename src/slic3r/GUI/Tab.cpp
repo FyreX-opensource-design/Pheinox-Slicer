@@ -2045,6 +2045,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("external_perimeters_first", category_path + "external-perimeters-first");
     optgroup->append_single_option_line("outer_wall_layer_height", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("conical_slicing", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("conical_angle", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("conical_slice_height", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("outer_wall_slope_antialiasing", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("zaa_enabled", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("zaa_min_height", category_path + "outer-wall-layer-height");
