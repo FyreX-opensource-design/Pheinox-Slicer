@@ -1331,6 +1331,7 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                  opt_key == "interlock_wave_amplitude" || opt_key == "interlock_wave_frequency" ||
                  opt_key == "interlock_wave_phase" ||
                  opt_key == "outer_wall_layer_height" || opt_key == "outer_wall_slope_antialiasing" ||
+                 opt_key == "outer_wall_scv" || opt_key == "outer_wall_scv_ranges" ||
                  opt_key == "zaa_enabled" || opt_key == "zaa_min_height" ||
                  opt_key == "seam_position" ||
                  opt_key == "scarf_seam_placement" ||

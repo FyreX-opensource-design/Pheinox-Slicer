@@ -1900,6 +1900,7 @@ void GCodeGenerator::_do_export(Print &print, GCodeOutputStream &file, Thumbnail
                 file.writeln(this->placeholder_parser_process("end_filament_gcode", end_gcode, extruder_id, &config));
             }
         }
+        file.write(this->reset_outer_wall_scv());
         file.writeln(this->placeholder_parser_process("end_gcode", print.config().end_gcode, m_writer.extruder()->id(),
                                                       &config));
     }
@@ -6123,6 +6124,127 @@ double GCodeGenerator::z_wave_offset_mm(const ZWave &wave, const double x_mm, co
     return wave.amplitude * scale * std::sin(wave.frequency * x_mm + wave.phase);
 }
 
+std::string GCodeGenerator::outer_wall_corner_scv(const Vec2d &from, const Vec2d &to)
+{
+    if (!m_config.outer_wall_scv.value || m_config.gcode_flavor.value != gcfKlipper)
+        return {};
+    const Vec2d dir = to - from;
+    if (dir.squaredNorm() < 1e-12)
+        return {};
+    std::string gcode;
+    if (m_outer_scv_has_dir)
+    {
+        const double mag1 = m_outer_scv_dir.norm();
+        const double mag2 = dir.norm();
+        double turn = 0.;
+        if (mag1 > 1e-9 && mag2 > 1e-9)
+        {
+            const double cosine = std::clamp(m_outer_scv_dir.dot(dir) / (mag1 * mag2), -1., 1.);
+            turn = std::round(std::acos(cosine) / 0.017453292519943295);
+        }
+        const std::string &ranges = m_config.outer_wall_scv_ranges.value;
+        bool matched = false;
+        double scv = 0.;
+        for (size_t i = 0; i < ranges.size();)
+        {
+            while (i < ranges.size() &&
+                   (ranges[i] == ' ' || ranges[i] == '\t' || ranges[i] == '\n' || ranges[i] == '\r' ||
+                    ranges[i] == ',' || ranges[i] == ';'))
+                ++i;
+            if (i >= ranges.size())
+                break;
+            char *end = nullptr;
+            const double band_scv = std::strtod(ranges.c_str() + i, &end);
+            if (end == ranges.c_str() + i)
+            {
+                ++i;
+                continue;
+            }
+            i = size_t(end - ranges.c_str());
+            while (i < ranges.size() && (ranges[i] == ' ' || ranges[i] == '\t'))
+                ++i;
+            if (i >= ranges.size() || ranges[i] != ':')
+            {
+                if (i < ranges.size())
+                    ++i;
+                continue;
+            }
+            ++i;
+            while (i < ranges.size() && (ranges[i] == ' ' || ranges[i] == '\t'))
+                ++i;
+            if (i >= ranges.size() || ranges[i] != '(')
+            {
+                if (i < ranges.size())
+                    ++i;
+                continue;
+            }
+            ++i;
+            const double lo = std::strtod(ranges.c_str() + i, &end);
+            if (end == ranges.c_str() + i)
+            {
+                ++i;
+                continue;
+            }
+            i = size_t(end - ranges.c_str());
+            while (i < ranges.size() && (ranges[i] == ' ' || ranges[i] == '\t'))
+                ++i;
+            if (i >= ranges.size() || ranges[i] != ',')
+            {
+                if (i < ranges.size())
+                    ++i;
+                continue;
+            }
+            ++i;
+            const double hi = std::strtod(ranges.c_str() + i, &end);
+            if (end == ranges.c_str() + i)
+            {
+                ++i;
+                continue;
+            }
+            i = size_t(end - ranges.c_str());
+            while (i < ranges.size() && (ranges[i] == ' ' || ranges[i] == '\t'))
+                ++i;
+            if (i < ranges.size() && ranges[i] == ')')
+                ++i;
+            const double band_lo = std::min(lo, hi);
+            const double band_hi = std::max(lo, hi);
+            if (!matched && turn >= band_lo && turn <= band_hi)
+            {
+                scv = band_scv;
+                matched = true;
+            }
+        }
+        if (!matched)
+        {
+            m_outer_scv_dir = dir;
+            m_outer_scv_has_dir = true;
+            return {};
+        }
+        if (!m_outer_scv_active || std::abs(scv - m_outer_scv) > 0.05)
+        {
+            gcode = m_writer.set_square_corner_velocity(scv);
+            m_outer_scv = scv;
+            m_outer_scv_active = true;
+        }
+    }
+    m_outer_scv_dir = dir;
+    m_outer_scv_has_dir = true;
+    return gcode;
+}
+
+std::string GCodeGenerator::reset_outer_wall_scv()
+{
+    m_outer_scv_has_dir = false;
+    if (!m_outer_scv_active)
+        return {};
+    m_outer_scv_active = false;
+    if (m_config.gcode_flavor.value != gcfKlipper)
+        return {};
+    const double scv = m_config.machine_klipper_square_corner_velocity.value;
+    m_outer_scv = scv;
+    return m_writer.set_square_corner_velocity(scv);
+}
+
 std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const Geometry::ArcWelder::Path &path,
                                      const std::string_view description, double speed,
                                      const EmitModifiers &emit_modifiers)
@@ -6192,6 +6314,11 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         const double height = path_attr.height > 1e-6f ? double(path_attr.height) : double(m_last_height);
         return this->m_last_layer_z + (double(height_fraction) - 1.0) * height;
     };
+
+    if (path_attr.role != ExtrusionRole::ExternalPerimeter)
+        gcode += this->reset_outer_wall_scv();
+    else if (!this->last_position || *this->last_position != path.front().point)
+        m_outer_scv_has_dir = false;
 
     if (!this->last_position)
     {
@@ -7106,6 +7233,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         //assert(p != prev);
         if (p != prev)
         {
+            if (path_attr.role == ExtrusionRole::ExternalPerimeter)
+                gcode += this->outer_wall_corner_scv(prev, p);
             // For segment splitting: apply flow multiplier specific to this segment
             double segment_e_per_mm = e_per_mm;
             size_t dest_index = segment_index + 1; // Index of destination point for this segment
@@ -7690,7 +7819,12 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
         }
         // Emit pressure advance command if enabled for this filament
         if (m_config.filament_enable_pressure_advance.get_at(extruder_id))
-            gcode += m_writer.set_pressure_advance(m_config.filament_pressure_advance.get_at(extruder_id), extruder_id);
+        {
+            const double pa = m_config.filament_pressure_advance.get_at(extruder_id);
+            gcode += m_writer.set_pressure_advance(pa, extruder_id);
+            m_pa_known = true;
+            m_pa_current = pa;
+        }
         gcode += m_writer.toolchange(extruder_id);
         return gcode;
     }
@@ -7786,7 +7920,12 @@ std::string GCodeGenerator::set_extruder(unsigned int extruder_id, double print_
     }
     // Emit pressure advance command if enabled for this filament
     if (m_config.filament_enable_pressure_advance.get_at(extruder_id))
-        gcode += m_writer.set_pressure_advance(m_config.filament_pressure_advance.get_at(extruder_id), extruder_id);
+    {
+        const double pa = m_config.filament_pressure_advance.get_at(extruder_id);
+        gcode += m_writer.set_pressure_advance(pa, extruder_id);
+        m_pa_known = true;
+        m_pa_current = pa;
+    }
 
     // Set the new extruder to the operating temperature.
     if (m_ooze_prevention.enable)

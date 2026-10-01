@@ -68,6 +68,7 @@ public:
     std::string set_temperature(unsigned int temperature, bool wait = false, int tool = -1) const;
     std::string set_bed_temperature(unsigned int temperature, bool wait = false);
     std::string set_pressure_advance(double pa, unsigned int extruder_id = 0) const;
+    std::string set_square_corner_velocity(double scv) const;
     std::string set_chamber_temperature(unsigned int temperature, bool wait, bool accurate) const;
     std::string set_print_acceleration(unsigned int acceleration)
     {

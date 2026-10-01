@@ -502,6 +502,7 @@ private:
     // Per-feature temperature, flow, and custom G-code. 0 / empty leaves that feature alone.
     double feature_flow_multiplier(GCodeExtrusionRole role) const;
     std::string feature_transition(GCodeExtrusionRole new_role);
+    std::string pressure_advance_for_role(GCodeExtrusionRole role);
     int feature_temperature_of(int feature) const;
     double feature_flow_of(int feature) const;
     std::string feature_custom_gcode(int feature, bool start) const;
@@ -536,6 +537,13 @@ private:
     };
     ZWave z_wave_for_role(const ExtrusionRole &role) const;
     double z_wave_offset_mm(const ZWave &wave, double x_mm, double z_mm) const;
+    // Klipper square corner velocity from the outer-wall turn. Off unless outer_wall_scv is set.
+    std::string outer_wall_corner_scv(const Vec2d &from, const Vec2d &to);
+    std::string reset_outer_wall_scv();
+    bool m_outer_scv_active{false};
+    double m_outer_scv{0.};
+    bool m_outer_scv_has_dir{false};
+    Vec2d m_outer_scv_dir{Vec2d::Zero()};
     bool rewrite_conical_path(const Geometry::ArcWelder::Path &in, double height_mm,
                               Geometry::ArcWelder::Path &out) const;
     bool m_conical_rewrite{false};
@@ -610,6 +618,8 @@ private:
     const PrintRegion *m_conical_region{nullptr};
 
     int m_feature_index{-1};
+    bool m_pa_known{false};
+    double m_pa_current{0.};
     bool m_feature_temp_locked{false};
     int m_feature_commanded_temp{-1};
     int m_feature_temp_baseline{0};

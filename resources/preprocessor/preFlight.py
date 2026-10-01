@@ -328,6 +328,7 @@ class Settings:
     filament_multitool_ramming_volume: str  # semicolon-separated floats
     filament_notes: str  # semicolon-separated
     filament_pressure_advance: str  # semicolon-separated floats
+    filament_pressure_advance_top: str
     filament_purge_multiplier: str  # semicolon-separated percentages
     filament_ramming_parameters: str  # semicolon-separated
     filament_seam_gap_distance: str
@@ -485,6 +486,8 @@ class Settings:
     only_retract_when_crossing_perimeters: str  # bool (0/1)
     ooze_prevention: str  # bool (0/1)
     outer_wall_layer_height: str  # float
+    outer_wall_scv: str  # bool (0/1)
+    outer_wall_scv_ranges: str
     outer_wall_slope_antialiasing: str  # bool (0/1)
     output_filename_format: str
     over_bridge_speed: str  # float or percentage

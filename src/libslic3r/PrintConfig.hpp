@@ -1079,7 +1079,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionEnum<ConicalSlicing>, conical_slicing))((ConfigOptionFloat, conical_angle))(
             (ConfigOptionFloat, conical_slice_height))((ConfigOptionFloat, inner_wall_wave_amplitude))(
             (ConfigOptionFloat, inner_wall_wave_frequency))((ConfigOptionFloat, inner_wall_wave_phase))(
-            (ConfigOptionBool, outer_wall_slope_antialiasing))(
+            (ConfigOptionBool, outer_wall_slope_antialiasing))((ConfigOptionBool, outer_wall_scv))(
+            (ConfigOptionString, outer_wall_scv_ranges))(
         (ConfigOptionBool, zaa_enabled))(
         (ConfigOptionFloat, zaa_min_height))((ConfigOptionBool, extra_perimeters))(
         (ConfigOptionBool, extra_perimeters_on_overhangs))((ConfigOptionBool, wave_overhangs))(
@@ -1210,6 +1211,7 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloats, filament_density))((ConfigOptionStrings, filament_type))(
         (ConfigOptionBools, filament_soluble))((ConfigOptionBools, filament_abrasive))(
         (ConfigOptionBools, filament_enable_pressure_advance))((ConfigOptionFloats, filament_pressure_advance))(
+        (ConfigOptionFloatsNullable, filament_pressure_advance_top))(
         (ConfigOptionFloats, filament_cost))((ConfigOptionFloats, filament_spool_weight))(
         (ConfigOptionFloats, filament_max_volumetric_speed))((ConfigOptionFloats, filament_max_volumetric_flow))(
         (ConfigOptionFloats, filament_max_print_speed))((ConfigOptionFloats, filament_infill_max_speed))(

@@ -225,6 +225,20 @@ std::string GCodeWriter::set_pressure_advance(double pa, unsigned int extruder_i
     return gcode.str();
 }
 
+std::string GCodeWriter::set_square_corner_velocity(double scv) const
+{
+    if (!FLAVOR_IS(gcfKlipper))
+        return {};
+    std::ostringstream gcode;
+    gcode << "SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=";
+    if (std::abs(scv - std::round(scv)) < 1e-6)
+        gcode << static_cast<long long>(std::llround(scv));
+    else
+        gcode << std::fixed << std::setprecision(3) << scv;
+    gcode << "\n";
+    return gcode.str();
+}
+
 std::string GCodeWriter::set_chamber_temperature(unsigned int temperature, bool wait, bool accurate) const
 {
     std::string_view code, comment;

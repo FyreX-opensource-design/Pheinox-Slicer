@@ -1712,6 +1712,8 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         CreateSettingRow(content, layer_group, "inner_wall_wave_frequency", _L("Inner wall wave frequency"));
         CreateSettingRow(content, layer_group, "inner_wall_wave_phase", _L("Inner wall wave phase"));
         CreateSettingRow(content, layer_group, "outer_wall_slope_antialiasing", _L("Antialias sloped outer walls"));
+        CreateSettingRow(content, layer_group, "outer_wall_scv", _L("Outer wall corner velocity"));
+        CreateSettingRow(content, layer_group, "outer_wall_scv_ranges", _L("Corner velocity ranges"));
         CreateSettingRow(content, layer_group, "zaa_enabled", _L("Z anti-aliasing"));
         CreateSettingRow(content, layer_group, "zaa_min_height", _L("Minimum Z height"));
         CreateSettingRow(content, layer_group, "first_layer_height", _L("First layer height"));
@@ -3124,6 +3126,9 @@ void PrintSettingsPanel::ApplyToggleLogic()
     ToggleOption("outer_wall_slope_antialiasing",
                  have_perimeters && config.opt_float("outer_wall_layer_height") > 0.);
     ToggleOption("zaa_min_height", config.opt_bool("zaa_enabled"));
+    const bool outer_scv = have_perimeters && config.opt_bool("outer_wall_scv");
+    ToggleOption("outer_wall_scv", have_perimeters);
+    ToggleOption("outer_wall_scv_ranges", outer_scv);
 
     bool have_wave_overhangs = have_perimeters && config.opt_bool("wave_overhangs");
     for (const char *el :
@@ -3815,6 +3820,8 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
                                                                                  "max_layer_height",
                                                                                  "fan_spinup_time",
                                                                                  "fan_spinup_response_type",
+                                                                                 "flow_temp_sec_per_c_heating",
+                                                                                 "flow_temp_sec_per_c_cooling",
                                                                                  "travel_ramping_lift",
                                                                                  "travel_max_lift",
                                                                                  "travel_slope",
@@ -5549,6 +5556,8 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
                   {
                       static const std::vector<std::string> extruder_options = {"fan_spinup_time",
                                                                                 "fan_spinup_response_type",
+                                                                                "flow_temp_sec_per_c_heating",
+                                                                                "flow_temp_sec_per_c_cooling",
                                                                                 "min_layer_height",
                                                                                 "max_layer_height",
                                                                                 "extruder_offset",
@@ -5617,6 +5626,15 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
         CreateExtruderSettingRow(content, fan_group, "fan_spinup_time", _L("Fan spin-up time"), extruder_idx);
         CreateExtruderSettingRow(content, fan_group, "fan_spinup_response_type", _L("Response type"), extruder_idx);
         sizer->Add(fan_group, 0, wxEXPAND | wxALL, em / 4);
+    }
+
+    {
+        auto *flow_temp_group = CreateFlatStaticBoxSizer(content, _L("Flow temperature"));
+        CreateExtruderSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_heating", _L("Heating time per °C"),
+                                 extruder_idx);
+        CreateExtruderSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_cooling", _L("Cooling time per °C"),
+                                 extruder_idx);
+        sizer->Add(flow_temp_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
     // Layer height limits group
@@ -6905,6 +6923,7 @@ wxPanel *FilamentSettingsPanel::BuildFilamentContent()
         auto *pa_group = CreateFlatStaticBoxSizer(content, _L("Pressure advance"));
         CreateSettingRow(content, pa_group, "filament_enable_pressure_advance", _L("Enable pressure advance"));
         CreateSettingRow(content, pa_group, "filament_pressure_advance", _L("Pressure advance"));
+        CreateNullableSettingRow(content, pa_group, "filament_pressure_advance_top", _L("Top surface pressure advance"));
         sizer->Add(pa_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -6921,14 +6940,12 @@ wxPanel *FilamentSettingsPanel::BuildFilamentContent()
         sizer->Add(temp_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
-    // Per-tool flow/temperature smoothing (one filament preset per toolhead).
+    // Filament temperature range. Heat-up and cool-down rates live on each printer extruder.
     {
         auto *flow_temp_group = CreateFlatStaticBoxSizer(content, _L("Flow temperature"));
         CreateSettingRow(content, flow_temp_group, "flow_temp_enabled", _L("Flow temperature control"));
         CreateSettingRow(content, flow_temp_group, "flow_temp_low", _L("Low temperature"));
         CreateSettingRow(content, flow_temp_group, "flow_temp_high", _L("High temperature"));
-        CreateSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_heating", _L("Heating time per °C"));
-        CreateSettingRow(content, flow_temp_group, "flow_temp_sec_per_c_cooling", _L("Cooling time per °C"));
         sizer->Add(flow_temp_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -9051,9 +9068,10 @@ void FilamentSettingsPanel::ApplyToggleLogic()
     // Pressure advance value depends on enable checkbox
     bool pa_enabled = config.opt_bool("filament_enable_pressure_advance", 0);
     ToggleOption("filament_pressure_advance", pa_enabled);
+    ToggleOption("filament_pressure_advance_top", pa_enabled);
 
     const bool flow_temp = config.opt_bool("flow_temp_enabled", 0);
-    for (const char *el : {"flow_temp_low", "flow_temp_high", "flow_temp_sec_per_c_heating", "flow_temp_sec_per_c_cooling"})
+    for (const char *el : {"flow_temp_low", "flow_temp_high"})
         ToggleOption(el, flow_temp);
 }
 

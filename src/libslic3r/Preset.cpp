@@ -586,6 +586,8 @@ static std::vector<std::string> s_Preset_print_options{
     "inner_wall_wave_frequency",
     "inner_wall_wave_phase",
     "outer_wall_slope_antialiasing",
+    "outer_wall_scv",
+    "outer_wall_scv_ranges",
     "zaa_enabled",
     "zaa_min_height",
     "fill_density",
@@ -853,7 +855,8 @@ static std::vector<std::string> s_Preset_print_options{
 
 static std::vector<std::string> s_Preset_filament_options{
     "filament_colour", "filament_transmission_distance", "filament_diameter", "filament_type", "filament_soluble",
-    "filament_abrasive", "filament_enable_pressure_advance", "filament_pressure_advance", "filament_notes",
+    "filament_abrasive", "filament_enable_pressure_advance", "filament_pressure_advance",
+    "filament_pressure_advance_top", "filament_notes",
     "filament_max_volumetric_speed", "filament_max_volumetric_flow", "filament_max_print_speed",
     "filament_infill_max_speed", "filament_infill_max_crossing_speed", "extrusion_multiplier", "filament_density",
     "filament_cost", "filament_spool_weight", "filament_loading_speed", "filament_loading_speed_start",
@@ -863,7 +866,7 @@ static std::vector<std::string> s_Preset_filament_options{
     "filament_cooling_final_speed", "filament_ramming_parameters", "filament_minimal_purge_on_wipe_tower",
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "temperature",
     "idle_temperature", "first_layer_temperature", "flow_temp_enabled", "flow_temp_low", "flow_temp_high",
-    "flow_temp_sec_per_c_heating", "flow_temp_sec_per_c_cooling", "feature_temp_external_perimeter",
+    "feature_temp_external_perimeter",
     "feature_flow_external_perimeter", "feature_gcode_start_external_perimeter", "feature_gcode_end_external_perimeter",
     "feature_temp_perimeter", "feature_flow_perimeter", "feature_gcode_start_perimeter", "feature_gcode_end_perimeter",
     "feature_temp_overhang_perimeter", "feature_flow_overhang_perimeter", "feature_gcode_start_overhang_perimeter",

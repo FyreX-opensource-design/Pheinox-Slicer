@@ -1572,6 +1572,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("outer_wall_scv", coBool);
+    def->label = L("Outer wall corner velocity");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("On Klipper, set square corner velocity from the turn of the outer wall. "
+                     "The ranges are written below as velocity:(min,max). Other features use the printer's "
+                     "square corner velocity. Off leaves every corner at that printer value.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("outer_wall_scv_ranges", coString);
+    def->label = L("Corner velocity ranges");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Square corner velocity for each outer-wall turn, written as velocity:(min,max). "
+                     "The angle is how far the wall turns: 0° is straight, 90° is a square corner, "
+                     "180° reverses. Separate ranges with commas or new lines. The first range that "
+                     "contains the turn is used.\n\n"
+                     "10:(0,67), 100:(68,112), 200:(113,157), 10:(158,180)");
+    def->multiline = true;
+    def->height = 4;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString("10:(0,67), 100:(68,112), 200:(113,157), 10:(158,180)"));
+
     def = this->add("extra_perimeters", coBool);
     def->label = L("Extra perimeters if needed");
     def->category = L("Layers and Perimeters");
@@ -2167,6 +2189,14 @@ void PrintConfigDef::init_fff_params()
                      "Typical values range from 0.01 to 0.15 for direct drive and 0.3 to 1.0 for Bowden.");
     def->min = 0;
     def->set_default_value(new ConfigOptionFloats{0.});
+
+    def = this->add_nullable("filament_pressure_advance_top", coFloats);
+    def->label = L("Top surface pressure advance");
+    def->tooltip = L("Pressure advance for top solid infill and ironing. "
+                     "Leave blank to keep the filament pressure advance. "
+                     "0 turns pressure advance off on those surfaces.");
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloatsNullable{ConfigOptionFloatsNullable::nil_value()});
 
     def = this->add("filament_cost", coFloats);
     def->label = L("Cost");
@@ -5508,6 +5538,7 @@ void PrintConfigDef::init_fff_params()
         "hotend while another tool is printing. The high temperature is reached at this filament's max volumetric "
         "flow. If that limit is zero, it is reached at the flow of the fastest 5% of extrusions in the print. "
         "A feature temperature overrides this while that feature is printing. "
+        "How fast the hotend heats and cools is set on each extruder in the printer profile. "
         "Adapted from the MZ Flow Temp processor.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools{false});
@@ -5538,8 +5569,9 @@ void PrintConfigDef::init_fff_params()
     def = this->add("flow_temp_sec_per_c_heating", coFloats);
     def->label = L("Heating time per °C");
     def->tooltip = L(
-        "Seconds this hotend needs to heat 1 °C. The lookahead window is long enough to cover a full swing from "
-        "the low temperature to the high one. Larger values delay and smooth the temperature change.");
+        "Seconds this extruder needs to heat 1 °C while a filament has flow temperature control on. "
+        "The lookahead window is long enough to cover a full swing from that filament's low temperature to its "
+        "high one. Larger values delay and smooth the temperature change.");
     def->sidetext = L("s/°C");
     def->min = 0.1;
     def->max = 120;
@@ -5549,8 +5581,8 @@ void PrintConfigDef::init_fff_params()
     def = this->add("flow_temp_sec_per_c_cooling", coFloats);
     def->label = L("Cooling time per °C");
     def->tooltip = L(
-        "Seconds this hotend needs to cool 1 °C. Used the same way as Heating time per °C when the target "
-        "temperature is falling.");
+        "Seconds this extruder needs to cool 1 °C while a filament has flow temperature control on. "
+        "Used the same way as Heating time per °C when the target temperature is falling.");
     def->sidetext = L("s/°C");
     def->min = 0.1;
     def->max = 120;
@@ -6187,6 +6219,8 @@ void PrintConfigDef::init_extruder_option_keys()
                               "nozzle_width_warning_max",
                               "fan_spinup_time",
                               "fan_spinup_response_type",
+                              "flow_temp_sec_per_c_heating",
+                              "flow_temp_sec_per_c_cooling",
                               "min_layer_height",
                               "max_layer_height",
                               "extruder_offset",

@@ -134,6 +134,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
                                                           "interlock_wave_amplitude",
                                                           "interlock_wave_frequency",
                                                           "interlock_wave_phase",
+                                                          "outer_wall_scv",
+                                                          "outer_wall_scv_ranges",
                                                           "extrusion_axis",
                                                           "extruder_clearance_height",
                                                           "extruder_clearance_radius",

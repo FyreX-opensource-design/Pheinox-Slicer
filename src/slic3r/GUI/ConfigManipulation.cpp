@@ -813,6 +813,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     toggle_field("inner_wall_wave_amplitude", have_perimeters);
     toggle_field("inner_wall_wave_frequency", inner_wave);
     toggle_field("inner_wall_wave_phase", inner_wave);
+    const bool outer_scv = have_perimeters && config->opt_bool("outer_wall_scv");
+    toggle_field("outer_wall_scv", have_perimeters);
+    toggle_field("outer_wall_scv_ranges", outer_scv);
     toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
 
     if (config->option("feature_temp_wait") != nullptr)

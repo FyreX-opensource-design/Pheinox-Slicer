@@ -554,8 +554,28 @@ std::string GCodeGenerator::feature_transition(const GCodeExtrusionRole new_role
     if (next_temp > 0)
         out += this->emit_feature_temperature(next_temp, true);
     append_user_gcode(out, this->feature_custom_gcode(next, true));
+    out += this->pressure_advance_for_role(new_role);
     m_feature_index = next;
     return out;
+}
+
+std::string GCodeGenerator::pressure_advance_for_role(const GCodeExtrusionRole role)
+{
+    if (m_writer.extruder() == nullptr)
+        return {};
+    const unsigned id = m_writer.extruder()->id();
+    if (!m_config.filament_enable_pressure_advance.get_at(id))
+        return {};
+    double want = m_config.filament_pressure_advance.get_at(id);
+    const bool top = role == GCodeExtrusionRole::TopSolidInfill || role == GCodeExtrusionRole::Ironing;
+    if (top && id < m_config.filament_pressure_advance_top.values.size() &&
+        !m_config.filament_pressure_advance_top.is_nil(id))
+        want = m_config.filament_pressure_advance_top.values[id];
+    if (m_pa_known && std::abs(want - m_pa_current) < 1e-6)
+        return {};
+    m_pa_known = true;
+    m_pa_current = want;
+    return m_writer.set_pressure_advance(want, id);
 }
 
 void GCodeGenerator::ensure_conical_band_grid()

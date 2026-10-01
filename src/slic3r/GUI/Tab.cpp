@@ -2054,6 +2054,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("inner_wall_wave_frequency", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("inner_wall_wave_phase", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("outer_wall_slope_antialiasing", category_path + "outer-wall-layer-height");
+    optgroup->append_single_option_line("outer_wall_scv", category_path + "outer-wall-corner-velocity");
+    optgroup->append_single_option_line("outer_wall_scv_ranges", category_path + "outer-wall-corner-velocity");
     optgroup->append_single_option_line("zaa_enabled", category_path + "outer-wall-layer-height");
     optgroup->append_single_option_line("zaa_min_height", category_path + "outer-wall-layer-height");
 
@@ -3324,6 +3326,7 @@ void TabFilament::build()
     optgroup = page->new_optgroup_for_sidebar(L("Pressure advance"));
     optgroup->append_single_option_line("filament_enable_pressure_advance");
     optgroup->append_single_option_line("filament_pressure_advance");
+    optgroup->append_single_option_line("filament_pressure_advance_top");
 
     optgroup = page->new_optgroup_for_sidebar(L("Temperature"));
 
@@ -3337,8 +3340,6 @@ void TabFilament::build()
     optgroup->append_single_option_line("flow_temp_enabled");
     optgroup->append_single_option_line("flow_temp_low");
     optgroup->append_single_option_line("flow_temp_high");
-    optgroup->append_single_option_line("flow_temp_sec_per_c_heating");
-    optgroup->append_single_option_line("flow_temp_sec_per_c_cooling");
 
     optgroup = page->new_optgroup_for_sidebar(L("Feature overrides"));
     for (const char *key : {"feature_temp_external_perimeter", "feature_flow_external_perimeter",
@@ -3657,6 +3658,7 @@ void TabFilament::toggle_options()
     {
         bool pa_enabled = m_config->opt_bool("filament_enable_pressure_advance", 0);
         toggle_option("filament_pressure_advance", pa_enabled);
+        toggle_option("filament_pressure_advance_top", pa_enabled);
 
         Page *page = m_active_page;
 
@@ -4767,6 +4769,8 @@ PageShp TabPrinter::build_kinematics_page()
 const std::vector<std::string> extruder_options = {
     "fan_spinup_time",
     "fan_spinup_response_type",
+    "flow_temp_sec_per_c_heating",
+    "flow_temp_sec_per_c_cooling",
     "min_layer_height",
     "max_layer_height",
     "extruder_offset",
@@ -5008,6 +5012,10 @@ void TabPrinter::build_extruder_pages(size_t n_before_extruders)
         optgroup = page->new_optgroup_for_sidebar(L("Cooling fan"));
         optgroup->append_single_option_line("fan_spinup_time", "", extruder_idx);
         optgroup->append_single_option_line("fan_spinup_response_type", "", extruder_idx);
+
+        optgroup = page->new_optgroup_for_sidebar(L("Flow temperature"));
+        optgroup->append_single_option_line("flow_temp_sec_per_c_heating", "", extruder_idx);
+        optgroup->append_single_option_line("flow_temp_sec_per_c_cooling", "", extruder_idx);
 
         optgroup = page->new_optgroup_for_sidebar(L("Layer height limits"));
         optgroup->append_single_option_line("min_layer_height", "", extruder_idx);
