@@ -235,6 +235,16 @@ public:
     // Counterbore bridge regions with forced bridge angle (radians).
     // One angle per corridor step, perpendicular to the corridor direction.
     std::vector<std::pair<ExPolygons, double>> counterbore_bridge_regions;
+    // Painted 2-way and 3-way color mixes. The area is the whole painted slice; make_fills
+    // keeps only the top surface and lays the pattern down as one filament per infill line.
+    // pattern holds 0-based filament slots with the recipe's multiplicity, so a 2:1 mix
+    // steps through two lines of the first filament and one of the second.
+    struct ColorMixTopStripe
+    {
+        ExPolygons area;
+        std::vector<int> pattern;
+    };
+    std::vector<ColorMixTopStripe> color_mix_top_stripes;
     std::vector<size_t> lslice_indices_sorted_by_print_order;
     LayerSlices lslices_ex;
 
@@ -798,6 +808,10 @@ protected:
     virtual ~Layer();
     // Clear fill extrusions, remove them from layer islands.
     void clear_fills();
+    // Painted 2-way and 3-way areas of this layer's top surfaces. The monotonic fill is left in place.
+    std::vector<ColorMixTopStripe> clip_color_mix_tops();
+    // Dither painted top infill and the wall loops around it in the mix ratio.
+    void emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs);
 
 private:
     // Real-time check of this layer's generated widths against the width warning maximum;

@@ -510,8 +510,10 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
     // filament instead of the blend. The base-layer behavior is configured separately in Print
     // Settings, so it isn't called out here. ---
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("%s", _u8L("Color blends best on near-vertical walls. Top faces and steep "
-                                   "overhangs may show a single filament instead of the blend.")
+    ImGui::TextDisabled("%s", _u8L("Color blends on near-vertical walls by changing filament each layer. "
+                                   "A top face of a 2-way or 3-way color dithers those filaments along the "
+                                   "infill lines and the walls around that top, in the same proportion. "
+                                   "Steep overhangs may still show one filament.")
                                   .c_str());
     ImGui::PopTextWrapPos();
 

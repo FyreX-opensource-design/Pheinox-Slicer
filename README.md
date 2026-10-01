@@ -30,6 +30,7 @@ Though the community has made a lot of post proccessers, and now (among other fe
 * (Own feature, with the help of the Voron Discord): Cat, shark, and puppy infill.
 * (TenTech): feature based flow, temp, and gcode start/end: https://github.com/TengerTechnologies/FeatureBasedGcodeSettings
 * (modified from RotBot et al.): sliced conical slicing.
+* (dev past work): SCV based on angle (klipper/Kailco only): https://github.com/FyreX-opensource-design/gcode-post-processors/blob/main/SCV.py
 
 - Visit **[preflight3d.com](https://preflight3d.com)** for features, screenshots, and details.
 - Community discussion on [GitHub Discussions](https://github.com/oozebot/preFlight/discussions/categories/preflight-features) and the [Duet3D forum](https://forum.duet3d.com/category/44/preflight).

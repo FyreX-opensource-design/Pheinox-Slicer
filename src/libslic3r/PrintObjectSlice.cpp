@@ -1480,6 +1480,14 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             {
                                 DitherConfig config;
                                 physical_extruder = resolve_layer_filament(r.pattern, (int) layer_id, config);
+                                // A 2-way or 3-way mix remembers this layer's painted area so the
+                                // top infill and the wall loops around it can dither that mix.
+                                std::vector<int> uniq = r.pattern;
+                                std::sort(uniq.begin(), uniq.end());
+                                uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+                                if ((uniq.size() == 2 || uniq.size() == 3) && !color_layer[idx].empty())
+                                    print_object.get_layer((int) layer_id)
+                                        ->color_mix_top_stripes.push_back({color_layer[idx], r.pattern});
                             }
                             else
                                 // No pattern available: snap to the closest pure filament instead of

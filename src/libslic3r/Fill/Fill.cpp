@@ -1692,6 +1692,665 @@ static void insert_fills_into_islands(Layer &layer, uint32_t fill_region_id, uin
     }
 }
 
+static int region_for_filament(const Layer &layer, int filament)
+{
+    if (filament < 0)
+        return -1;
+    const int want = filament + 1;
+    for (size_t i = 0; i < layer.regions().size(); ++i)
+        if (layer.regions()[i]->region().config().solid_infill_extruder.value == want)
+            return (int) i;
+    return -1;
+}
+
+static std::vector<int> unique_in_order(const std::vector<int> &pattern)
+{
+    std::vector<int> uniq;
+    for (int filament : pattern)
+        if (std::find(uniq.begin(), uniq.end(), filament) == uniq.end())
+            uniq.push_back(filament);
+    return uniq;
+}
+
+// Split a polyline wherever the travel direction turns. Monotonic infill is one
+// zigzag; each straight run is one scan line or the short link between two lines.
+static std::vector<Polyline> split_straight_runs(const Polyline &pl)
+{
+    std::vector<Polyline> runs;
+    if (pl.points.size() < 2)
+        return runs;
+    const double min_dot = std::cos(20.0 * M_PI / 180.0);
+    Polyline cur;
+    cur.points.push_back(pl.points.front());
+    Vec2d dir{0., 0.};
+    bool has_dir = false;
+    for (size_t i = 1; i < pl.points.size(); ++i)
+    {
+        const Point &p = pl.points[i];
+        if (p == cur.points.back())
+            continue;
+        Vec2d step = (p - cur.points.back()).cast<double>();
+        const double len = step.norm();
+        if (len < 1.0)
+            continue;
+        step /= len;
+        if (has_dir && dir.dot(step) < min_dot)
+        {
+            const Point corner = cur.points.back();
+            if (cur.size() >= 2)
+                runs.emplace_back(std::move(cur));
+            cur = Polyline();
+            cur.points.push_back(corner);
+            has_dir = false;
+        }
+        cur.points.push_back(p);
+        dir = step;
+        has_dir = true;
+    }
+    if (cur.size() >= 2)
+        runs.emplace_back(std::move(cur));
+    return runs;
+}
+
+static Point point_at(const Point &a, const Point &b, double t)
+{
+    return Point{coord_t(std::llround(double(a.x()) + t * (double(b.x()) - double(a.x())))),
+                 coord_t(std::llround(double(a.y()) + t * (double(b.y()) - double(a.y()))))};
+}
+
+// Cut a scan line into steps about one bead long. The mix pattern walks these steps, and
+// neighboring lines are shifted so the minority filament is scattered instead of striped.
+static std::vector<Polyline> split_by_length(const Polyline &pl, double step)
+{
+    std::vector<Polyline> out;
+    if (pl.points.size() < 2 || step < 1.0)
+        return out;
+    Polyline cur;
+    cur.points.push_back(pl.points.front());
+    double acc = 0;
+    for (size_t i = 1; i < pl.points.size(); ++i)
+    {
+        Point target = pl.points[i];
+        while (cur.points.back() != target)
+        {
+            const Point from = cur.points.back();
+            const double seg = (target - from).cast<double>().norm();
+            if (seg < 1.0)
+                break;
+            if (acc + seg < step)
+            {
+                cur.points.push_back(target);
+                acc += seg;
+                break;
+            }
+            const double t = std::min(1.0, (step - acc) / seg);
+            const Point cut = point_at(from, target, t);
+            if (cut == from)
+            {
+                cur.points.push_back(target);
+                acc += seg;
+                break;
+            }
+            cur.points.push_back(cut);
+            if (cur.size() >= 2)
+                out.emplace_back(std::move(cur));
+            cur = Polyline();
+            cur.points.push_back(cut);
+            acc = 0;
+        }
+    }
+    if (cur.size() >= 2)
+    {
+        if (!out.empty() && cur.length() < step * 0.5 && out.back().points.back() == cur.points.front())
+            out.back().points.insert(out.back().points.end(), cur.points.begin() + 1, cur.points.end());
+        else
+            out.emplace_back(std::move(cur));
+    }
+    return out;
+}
+
+struct ColorMixWallPiece
+{
+    Polyline pl;
+    ExtrusionAttributes attrs;
+};
+
+static void collect_wall_pieces(const ExtrusionEntity *entity, std::vector<ColorMixWallPiece> &out)
+{
+    auto take = [&](const ExtrusionPath &path) {
+        if (path.polyline.size() >= 2 && path.role().has(ExtrusionRoleModifier::Perimeter))
+            out.push_back(ColorMixWallPiece{path.polyline, path.attributes()});
+    };
+    if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity))
+        take(*path);
+    else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
+        for (const ExtrusionPath &path : loop->paths)
+            take(path);
+    else if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(entity))
+        for (const ExtrusionPath &path : multi->paths)
+            take(path);
+}
+
+// Walk the mix along a wall. Consecutive steps of the same filament stay one path.
+static void dither_wall_polyline(const Polyline &pl, const ExtrusionAttributes &attrs, const std::vector<int> &pattern,
+                                 int phase, double step, std::vector<ColorMixWallPiece> &out, std::vector<int> &filaments)
+{
+    const std::vector<Polyline> steps = split_by_length(pl, step);
+    const int n = (int) pattern.size();
+    if (n <= 0 || steps.empty())
+        return;
+    int run_filament = -1;
+    Polyline run;
+    auto flush = [&]() {
+        if (run.size() >= 2 && run_filament >= 0)
+        {
+            out.push_back(ColorMixWallPiece{std::move(run), attrs});
+            filaments.push_back(run_filament);
+        }
+        run.clear();
+    };
+    for (size_t s = 0; s < steps.size(); ++s)
+    {
+        const int slot = ((int(s) + phase) % n + n) % n;
+        const int filament = pattern[(size_t) slot];
+        if (filament != run_filament)
+        {
+            flush();
+            run_filament = filament;
+        }
+        if (run.empty())
+            run = steps[s];
+        else if (run.points.back() == steps[s].points.front())
+            run.points.insert(run.points.end(), steps[s].points.begin() + 1, steps[s].points.end());
+        else
+        {
+            flush();
+            run = steps[s];
+            run_filament = filament;
+        }
+    }
+    flush();
+}
+
+std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
+{
+    std::vector<ColorMixTopStripe> jobs;
+    if (color_mix_top_stripes.empty())
+        return jobs;
+
+    ExPolygons tops;
+    for (LayerRegion *lr : m_regions)
+        for (const Surface &s : lr->m_fill_surfaces.surfaces)
+            if (s.surface_type == stTop)
+                tops.emplace_back(s.expolygon);
+    if (tops.empty())
+    {
+        color_mix_top_stripes.clear();
+        return jobs;
+    }
+
+    for (ColorMixTopStripe &stripe : color_mix_top_stripes)
+    {
+        if (stripe.pattern.empty() || stripe.area.empty())
+            continue;
+        const std::vector<int> uniq = unique_in_order(stripe.pattern);
+        if (uniq.size() != 2 && uniq.size() != 3)
+            continue;
+        bool have_regions = true;
+        for (int filament : uniq)
+            if (region_for_filament(*this, filament) < 0)
+                have_regions = false;
+        if (!have_regions)
+            continue;
+        // The top fill has to exist or this is a side wall, which keeps the per-layer filament.
+        // The stored area is the whole painted slice, so the wall loops around that top are included.
+        if (intersection_ex(tops, stripe.area).empty())
+            continue;
+        jobs.push_back({std::move(stripe.area), std::move(stripe.pattern)});
+    }
+    color_mix_top_stripes.clear();
+    return jobs;
+}
+
+void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
+{
+    if (jobs.empty())
+        return;
+
+    std::vector<std::vector<int>> uniq_by_job;
+    uniq_by_job.reserve(jobs.size());
+    ExPolygons mask;
+    for (const ColorMixTopStripe &job : jobs)
+    {
+        uniq_by_job.push_back(unique_in_order(job.pattern));
+        append(mask, job.area);
+    }
+    if (mask.empty())
+        return;
+    const BoundingBox mask_bb = get_extents(mask);
+    const double align_min = std::cos(35.0 * M_PI / 180.0);
+    const double join_gap = double(scale_(0.05));
+
+    struct Moved
+    {
+        double proj;
+        double pitch;
+        int job;
+        int angle_key;
+        ExtrusionAttributes attrs;
+        bool oriented;
+        Polyline pl;
+    };
+    struct Kept
+    {
+        Polyline pl;
+        ExtrusionAttributes attrs;
+        bool oriented;
+    };
+
+    for (LayerSlice &lslice : this->lslices_ex)
+        for (LayerIsland &island : lslice.islands)
+        {
+            std::vector<Moved> moved;
+            const size_t n_ranges = island.fills.size();
+            for (size_t ri = 0; ri < n_ranges; ++ri)
+            {
+                const LayerExtrusionRange range = island.fills[ri];
+                if (range.region() >= m_regions.size())
+                    continue;
+                LayerRegion *lr = this->get_region((int) range.region());
+                const float fill_angle = float(Geometry::deg2rad(lr->region().config().fill_angle.value));
+                const Vec2d fill_axis{std::cos(double(fill_angle)), std::sin(double(fill_angle))};
+                // Rectilinear / monotonic lines run along the fill angle. Spacing is measured on the
+                // perpendicular, which is the direction _infill_direction rotates the polygon by.
+                const float spacing_axis = fill_angle + float(M_PI / 2.);
+                const double axis_x = std::cos(double(spacing_axis));
+                const double axis_y = std::sin(double(spacing_axis));
+                const double pitch = std::max(double(scale_(0.05)), double(lr->flow(frTopSolidInfill).scaled_spacing()));
+                const int angle_key = (int) std::lround(double(fill_angle) / (5.0 * M_PI / 180.0));
+
+                for (uint32_t ei = *range.begin(); ei < *range.end(); ++ei)
+                {
+                    auto *eec = dynamic_cast<ExtrusionEntityCollection *>(lr->m_fills.entities[ei]);
+                    if (eec == nullptr)
+                        continue;
+
+                    ExtrusionEntitiesPtr rebuilt;
+                    rebuilt.reserve(eec->entities.size());
+                    bool changed = false;
+                    for (ExtrusionEntity *child : eec->entities)
+                    {
+                        auto *path = dynamic_cast<ExtrusionPath *>(child);
+                        if (path == nullptr || path->role() != ExtrusionRole::TopSolidInfill ||
+                            !mask_bb.overlap(path->polyline.bounding_box()))
+                        {
+                            rebuilt.push_back(child);
+                            continue;
+                        }
+
+                        const ExtrusionAttributes attrs = path->attributes();
+                        const bool oriented = !path->can_reverse();
+                        const std::vector<Polyline> runs = split_straight_runs(path->polyline);
+                        Vec2d line_axis = fill_axis;
+                        bool saw_fill_line = false;
+                        double longest_other = 0;
+                        Vec2d other_axis = fill_axis;
+                        for (const Polyline &run : runs)
+                        {
+                            if (run.length() < pitch)
+                                continue;
+                            Vec2d step = (run.points.back() - run.points.front()).cast<double>();
+                            const double len = step.norm();
+                            if (len < 1.0)
+                                continue;
+                            step /= len;
+                            if (std::abs(step.dot(fill_axis)) >= align_min)
+                                saw_fill_line = true;
+                            else if (len > longest_other)
+                            {
+                                longest_other = len;
+                                other_axis = step;
+                            }
+                        }
+                        if (!saw_fill_line)
+                            line_axis = other_axis;
+
+                        std::vector<Kept> kept;
+                        bool touched = false;
+                        auto append_kept = [&](Polyline pl) {
+                            if (pl.size() < 2)
+                                return;
+                            if (!kept.empty() &&
+                                (kept.back().pl.points.back() - pl.points.front()).cast<double>().norm() <= join_gap)
+                            {
+                                kept.back().pl.points.insert(kept.back().pl.points.end(), pl.points.begin() +
+                                                                                              (kept.back().pl.points.back() == pl.points.front() ? 1 : 0),
+                                                             pl.points.end());
+                                return;
+                            }
+                            kept.push_back(Kept{std::move(pl), attrs, oriented});
+                        };
+
+                        for (const Polyline &run : runs)
+                        {
+                            if (run.size() < 2)
+                                continue;
+                            Vec2d run_dir = (run.points.back() - run.points.front()).cast<double>();
+                            const double run_len = run_dir.norm();
+                            if (run_len > 1.0)
+                                run_dir /= run_len;
+                            const Point origin = run.points.front();
+
+                            struct Bit
+                            {
+                                double key;
+                                bool inside;
+                                Polyline pl;
+                            };
+                            std::vector<Bit> bits;
+                            auto take = [&](Polylines pls, bool inside) {
+                                for (Polyline &pl : pls)
+                                {
+                                    if (pl.size() < 2)
+                                        continue;
+                                    const double key = (pl.points.front() - origin).cast<double>().dot(run_dir);
+                                    bits.push_back(Bit{key, inside, std::move(pl)});
+                                }
+                            };
+                            take(diff_pl(Polylines{run}, mask), false);
+                            take(intersection_pl(Polylines{run}, mask), true);
+                            std::sort(bits.begin(), bits.end(), [](const Bit &a, const Bit &b) { return a.key < b.key; });
+
+                            for (Bit &bit : bits)
+                            {
+                                if (!bit.inside)
+                                {
+                                    append_kept(std::move(bit.pl));
+                                    continue;
+                                }
+                                Vec2d step = (bit.pl.points.back() - bit.pl.points.front()).cast<double>();
+                                const double len = step.norm();
+                                if (len < 1.0 || bit.pl.length() < pitch * 0.5)
+                                {
+                                    touched = true;
+                                    continue;
+                                }
+                                step /= len;
+                                if (std::abs(step.dot(line_axis)) < align_min)
+                                {
+                                    touched = true;
+                                    continue;
+                                }
+                                const Point mid{(bit.pl.points.front().x() + bit.pl.points.back().x()) / 2,
+                                                (bit.pl.points.front().y() + bit.pl.points.back().y()) / 2};
+                                int job_i = -1;
+                                for (size_t j = 0; j < jobs.size() && job_i < 0; ++j)
+                                    for (const ExPolygon &ep : jobs[j].area)
+                                        if (ep.contains(mid))
+                                        {
+                                            job_i = (int) j;
+                                            break;
+                                        }
+                                if (job_i < 0 || uniq_by_job[job_i].size() < 2)
+                                {
+                                    append_kept(std::move(bit.pl));
+                                    continue;
+                                }
+                                const double proj = double(mid.x()) * axis_x + double(mid.y()) * axis_y;
+                                moved.push_back(Moved{proj, pitch, job_i, angle_key, attrs, oriented, std::move(bit.pl)});
+                                touched = true;
+                            }
+                        }
+
+                        if (!touched)
+                        {
+                            rebuilt.push_back(child);
+                            continue;
+                        }
+                        changed = true;
+                        for (Kept &piece : kept)
+                        {
+                            if (piece.oriented)
+                                rebuilt.push_back(new ExtrusionPathOriented(std::move(piece.pl), piece.attrs));
+                            else
+                                rebuilt.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                        }
+                        delete child;
+                    }
+                    if (changed)
+                        eec->entities.swap(rebuilt);
+                }
+            }
+
+            if (moved.empty())
+                continue;
+
+            std::sort(moved.begin(), moved.end(), [](const Moved &a, const Moved &b) {
+                if (a.job != b.job)
+                    return a.job < b.job;
+                if (a.angle_key != b.angle_key)
+                    return a.angle_key < b.angle_key;
+                return a.proj < b.proj;
+            });
+
+            std::vector<int> line_of(moved.size(), 0);
+            int line = 0;
+            double line_proj = moved.front().proj;
+            int line_job = moved.front().job;
+            int line_angle = moved.front().angle_key;
+            double line_pitch = moved.front().pitch;
+            for (size_t i = 0; i < moved.size(); ++i)
+            {
+                const Moved &m = moved[i];
+                if (m.job != line_job || m.angle_key != line_angle || m.proj - line_proj > 0.45 * line_pitch)
+                {
+                    if (i > 0)
+                        ++line;
+                    line_job = m.job;
+                    line_angle = m.angle_key;
+                    line_proj = m.proj;
+                    line_pitch = m.pitch;
+                }
+                line_of[i] = line;
+            }
+
+            std::vector<std::pair<int, ExtrusionEntityCollection *>> groups;
+            auto group_for = [&](int region_id) -> ExtrusionEntityCollection * {
+                for (auto &g : groups)
+                    if (g.first == region_id)
+                        return g.second;
+                auto *eec = new ExtrusionEntityCollection();
+                eec->no_sort = true;
+                groups.emplace_back(region_id, eec);
+                return eec;
+            };
+            for (size_t i = 0; i < moved.size(); ++i)
+            {
+                Moved &m = moved[i];
+                const std::vector<int> &pattern = jobs[m.job].pattern;
+                const int n = (int) pattern.size();
+                if (n <= 0 || m.pl.size() < 2)
+                    continue;
+                // One bead per pattern step. Consecutive steps of the same filament stay one path.
+                const std::vector<Polyline> steps = split_by_length(m.pl, m.pitch);
+                const int phase = line_of[i];
+                int run_filament = -1;
+                Polyline run;
+                auto flush_run = [&]() {
+                    if (run.size() < 2 || run_filament < 0)
+                    {
+                        run.clear();
+                        return;
+                    }
+                    const int region_id = region_for_filament(*this, run_filament);
+                    if (region_id >= 0)
+                    {
+                        ExtrusionEntityCollection *eec = group_for(region_id);
+                        if (m.oriented)
+                            eec->entities.push_back(new ExtrusionPathOriented(std::move(run), m.attrs));
+                        else
+                            eec->entities.push_back(new ExtrusionPath(std::move(run), m.attrs));
+                    }
+                    run.clear();
+                };
+                for (size_t s = 0; s < steps.size(); ++s)
+                {
+                    const int slot = ((int(s) + phase) % n + n) % n;
+                    const int filament = pattern[(size_t) slot];
+                    if (filament != run_filament)
+                    {
+                        flush_run();
+                        run_filament = filament;
+                    }
+                    if (run.empty())
+                        run = steps[s];
+                    else if (run.points.back() == steps[s].points.front())
+                        run.points.insert(run.points.end(), steps[s].points.begin() + 1, steps[s].points.end());
+                    else
+                    {
+                        flush_run();
+                        run = steps[s];
+                        run_filament = filament;
+                    }
+                }
+                flush_run();
+            }
+            for (auto &g : groups)
+            {
+                if (g.second->entities.empty())
+                {
+                    delete g.second;
+                    continue;
+                }
+                LayerRegion *lr = this->get_region(g.first);
+                const uint32_t begin = (uint32_t) lr->m_fills.entities.size();
+                lr->m_fills.entities.push_back(g.second);
+                island.add_fill_range(LayerExtrusionRange{(uint32_t) g.first, {begin, begin + 1}});
+            }
+
+            // Wall loops around the painted top. The home extruder's stretches stay with the
+            // perimeters; the other filaments are parked on their own regions and printed with
+            // the infill of that color, still tagged as walls.
+            if (island.perimeters.empty() || island.perimeters.region() >= m_regions.size())
+                continue;
+            LayerRegion *wall_region = this->get_region((int) island.perimeters.region());
+            const int home_region = (int) island.perimeters.region();
+            std::vector<std::pair<int, ExtrusionEntityCollection *>> wall_groups;
+            auto wall_group_for = [&](int region_id) -> ExtrusionEntityCollection * {
+                for (auto &g : wall_groups)
+                    if (g.first == region_id)
+                        return g.second;
+                auto *collection = new ExtrusionEntityCollection();
+                collection->no_sort = true;
+                wall_groups.emplace_back(region_id, collection);
+                return collection;
+            };
+            int wall_phase = 0;
+            for (uint32_t ei = *island.perimeters.begin(); ei < *island.perimeters.end(); ++ei)
+            {
+                auto *eec = dynamic_cast<ExtrusionEntityCollection *>(wall_region->m_perimeters.entities[ei]);
+                if (eec == nullptr)
+                    continue;
+                ExtrusionEntitiesPtr rebuilt;
+                rebuilt.reserve(eec->entities.size());
+                bool changed = false;
+                for (ExtrusionEntity *child : eec->entities)
+                {
+                    std::vector<ColorMixWallPiece> pieces;
+                    collect_wall_pieces(child, pieces);
+                    if (pieces.empty())
+                    {
+                        rebuilt.push_back(child);
+                        continue;
+                    }
+                    bool touched = false;
+                    ExtrusionEntitiesPtr replacement;
+                    for (ColorMixWallPiece &piece : pieces)
+                    {
+                        if (!mask_bb.overlap(piece.pl.bounding_box()))
+                        {
+                            replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                            continue;
+                        }
+                        Polylines inside = intersection_pl(Polylines{piece.pl}, mask);
+                        if (inside.empty())
+                        {
+                            replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                            continue;
+                        }
+                        touched = true;
+                        for (Polyline &out : diff_pl(Polylines{piece.pl}, mask))
+                            if (out.size() >= 2)
+                                replacement.push_back(new ExtrusionPath(std::move(out), piece.attrs));
+                        const double step = std::max(double(scale_(0.05)), double(scale_(std::max(0.05f, piece.attrs.width))));
+                        for (Polyline &in : inside)
+                        {
+                            if (in.size() < 2 || in.length() < step * 0.5)
+                            {
+                                if (in.size() >= 2)
+                                    replacement.push_back(new ExtrusionPath(std::move(in), piece.attrs));
+                                continue;
+                            }
+                            const Point mid{coord_t((int64_t(in.points.front().x()) + in.points.back().x()) / 2),
+                                            coord_t((int64_t(in.points.front().y()) + in.points.back().y()) / 2)};
+                            int job_i = -1;
+                            for (size_t j = 0; j < jobs.size() && job_i < 0; ++j)
+                                for (const ExPolygon &ep : jobs[j].area)
+                                    if (ep.contains(mid))
+                                    {
+                                        job_i = (int) j;
+                                        break;
+                                    }
+                            if (job_i < 0)
+                            {
+                                replacement.push_back(new ExtrusionPath(std::move(in), piece.attrs));
+                                continue;
+                            }
+                            std::vector<ColorMixWallPiece> spans;
+                            std::vector<int> filaments;
+                            dither_wall_polyline(in, piece.attrs, jobs[job_i].pattern, wall_phase, step, spans, filaments);
+                            ++wall_phase;
+                            for (size_t s = 0; s < spans.size(); ++s)
+                            {
+                                const int dest = region_for_filament(*this, filaments[s]);
+                                ExtrusionPath *span_path = new ExtrusionPath(std::move(spans[s].pl), spans[s].attrs);
+                                if (dest < 0 || dest == home_region)
+                                    replacement.push_back(span_path);
+                                else
+                                    wall_group_for(dest)->entities.push_back(span_path);
+                            }
+                        }
+                    }
+                    if (!touched)
+                    {
+                        for (ExtrusionEntity *made : replacement)
+                            delete made;
+                        rebuilt.push_back(child);
+                        continue;
+                    }
+                    changed = true;
+                    for (ExtrusionEntity *made : replacement)
+                        rebuilt.push_back(made);
+                    delete child;
+                }
+                if (changed)
+                    eec->entities.swap(rebuilt);
+            }
+            for (auto &g : wall_groups)
+            {
+                if (g.second->entities.empty())
+                {
+                    delete g.second;
+                    continue;
+                }
+                LayerRegion *lr = this->get_region(g.first);
+                const uint32_t begin = (uint32_t) lr->m_fills.entities.size();
+                lr->m_fills.entities.push_back(g.second);
+                island.add_fill_range(LayerExtrusionRange{(uint32_t) g.first, {begin, begin + 1}});
+            }
+        }
+}
+
 void Layer::clear_fills()
 {
     for (LayerRegion *layerm : m_regions)
@@ -1714,6 +2373,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
     // new narrow stInternal fragments. Catch those before fill generation.
     for (size_t region_id = 0; region_id < this->regions().size(); ++region_id)
         this->regions()[region_id]->remove_narrow_fill_surfaces();
+
+    // Remember painted 2-way and 3-way tops. The monotonic fill is generated first, then recolored per line.
+    const std::vector<ColorMixTopStripe> color_mix_jobs = this->clip_color_mix_tops();
 
     std::vector<SurfaceFill> surface_fills = group_fills(*this);
     {
@@ -2314,6 +2976,8 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
             }
         }
     }
+
+    this->emit_color_mix_top_lines(color_mix_jobs);
 
     for (LayerSlice &lslice : this->lslices_ex)
         for (LayerIsland &island : lslice.islands)
