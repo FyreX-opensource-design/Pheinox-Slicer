@@ -37,20 +37,6 @@
 namespace Slic3r::GUI
 {
 
-// Ordered dither over the virtual color's layer pattern. Neighboring cells take different
-// slots, so a 2-way or 3-way mix shows up as its filaments instead of one solid band.
-static int bayer_slot(int x, int y, int count)
-{
-    static constexpr int bayer[8][8] = {
-        {0, 32, 8, 40, 2, 34, 10, 42},  {48, 16, 56, 24, 50, 18, 58, 26}, {12, 44, 4, 36, 14, 46, 6, 38},
-        {60, 28, 52, 20, 62, 30, 54, 22}, {3, 35, 11, 43, 1, 33, 9, 41},  {51, 19, 59, 27, 49, 17, 57, 25},
-        {15, 47, 7, 39, 13, 45, 5, 37},  {63, 31, 55, 23, 61, 29, 53, 21},
-    };
-    if (count <= 1)
-        return 0;
-    return (bayer[y & 7][x & 7] * count) / 64;
-}
-
 TriangleStateType GLGizmoColorMixing::get_left_button_state_type() const
 {
     // Eraser mode overrides the left-click state to NONE so painting clears existing color
@@ -205,19 +191,8 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
         return;
 
     const MappedImage &image = *m_mapped_image;
-    const std::vector<MixedColor> &palette_colors = m_palette.colors();
-    // Pure entries are the physical filaments. A mix is painted as those filaments, in the
-    // same ratio as its layer pattern, so the picture is visible on one layer.
-    std::vector<int> filament_state(m_filament_optics.size(), -1);
-    for (size_t i = 0; i < m_palette.num_pure_filaments() && i < palette_colors.size(); ++i)
-    {
-        const std::vector<int> &pattern = palette_colors[i].layer_pattern;
-        if (pattern.empty())
-            continue;
-        const int filament = pattern.front();
-        if (filament >= 0 && filament < int(filament_state.size()) && filament_state[size_t(filament)] < 0)
-            filament_state[size_t(filament)] = int(i);
-    }
+    // Each pixel keeps the virtual color it matched, including 2-way and 3-way mixes.
+    // The paint preview shows that blend. Slicing still lays down the mix's filaments.
     std::vector<int> quantized(size_t(image.width) * size_t(image.height), -1);
     for (int i = 0; i < image.width * image.height; ++i)
     {
@@ -225,21 +200,7 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
             continue;
         const unsigned char *px = image.rgb.data() + size_t(i) * 3;
         const uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-        const int palette_idx = m_palette.find_best_match(rgb);
-        if (palette_idx < 0 || palette_idx >= int(palette_colors.size()))
-            continue;
-        const std::vector<int> &pattern = palette_colors[size_t(palette_idx)].layer_pattern;
-        if (pattern.empty())
-        {
-            quantized[size_t(i)] = palette_idx;
-            continue;
-        }
-        const int x = i % image.width;
-        const int y = i / image.width;
-        const int filament = pattern[size_t(bayer_slot(x, y, int(pattern.size())))];
-        const int pure = (filament >= 0 && filament < int(filament_state.size())) ? filament_state[size_t(filament)]
-                                                                                    : -1;
-        quantized[size_t(i)] = pure >= 0 ? pure : palette_idx;
+        quantized[size_t(i)] = m_palette.find_best_match(rgb);
     }
 
     int instance_idx = m_parent.get_selection().get_instance_idx();
@@ -1147,15 +1108,14 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
     ImGui::TextDisabled("%s",
                         m_image_projection == 0
                             ? _u8L("Place on next click, then click a face. Brush painting stays "
-                                   "available until you do. The picture uses the filaments of the "
-                                   "closest virtual color, mixed across the surface. Connected "
-                                   "surfaces that point the same way are included. Transparent parts "
-                                   "of a PNG are left unpainted.")
+                                   "available until you do. Each pixel becomes the closest virtual "
+                                   "color, including 2-way and 3-way mixes. Connected surfaces that "
+                                   "point the same way are included. Transparent parts of a PNG are "
+                                   "left unpainted.")
                                   .c_str()
                             : _u8L("Projects a picture onto the surfaces that face the chosen side. "
-                                   "The picture uses the filaments of the closest virtual color, "
-                                   "mixed across the surface. Transparent parts of a PNG are left "
-                                   "unpainted.")
+                                   "Each pixel becomes the closest virtual color, including 2-way "
+                                   "and 3-way mixes. Transparent parts of a PNG are left unpainted.")
                                   .c_str());
     ImGui::PopTextWrapPos();
     // The file dialog cannot open inside this draw. A mouse-up redraw is what called us,
