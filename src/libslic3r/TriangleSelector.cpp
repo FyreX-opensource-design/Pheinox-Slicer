@@ -1301,6 +1301,166 @@ void TriangleSelector::set_facet(int facet_idx, TriangleStateType state)
     m_triangles[facet_idx].set_state(state);
 }
 
+int TriangleSelector::paint_planar_image(
+    const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
+    const std::function<std::optional<TriangleStateType>(const Vec3d &world_point)> &sample,
+    const std::vector<unsigned char> *source_facets)
+{
+    if (!sample || face_outward.squaredNorm() < 1e-16 || !(max_edge_world_mm > 0.f) || m_orig_size_indices <= 0)
+        return 0;
+
+    const Vec3d face = face_outward.normalized();
+    const Eigen::Matrix3d linear = mesh_to_world.linear();
+    if (std::abs(linear.determinant()) < 1e-18)
+        return 0;
+    const Eigen::Matrix3d normal_matrix = linear.inverse().transpose();
+    int assigned = 0;
+
+    const auto world_point = [&](int vertex_idx) -> Vec3d
+    { return mesh_to_world * m_vertices[vertex_idx].v.cast<double>(); };
+
+    // A big face is usually two triangles split by a diagonal. Depth-first splitting used to
+    // spend the whole triangle budget on the first one, so the picture stopped on that 45° cut.
+    // Pick one patch size that covers every facing triangle, coarsening only when the user's
+    // detail would not fit.
+    std::vector<double> root_edge_sq;
+    root_edge_sq.reserve(64);
+    double longest_root = 0;
+    for (int facet = 0; facet < m_orig_size_indices; ++facet)
+    {
+        const Triangle &tr = m_triangles[facet];
+        if (!tr.valid())
+            continue;
+        if (source_facets != nullptr &&
+            (tr.source_triangle < 0 || tr.source_triangle >= int(source_facets->size()) ||
+             (*source_facets)[tr.source_triangle] == 0))
+            continue;
+        const Vec3f &mesh_normal = m_face_normals[tr.source_triangle];
+        Vec3d normal = normal_matrix * mesh_normal.cast<double>();
+        const double normal_len = normal.norm();
+        if (!(normal_len > 1e-12) || normal.dot(face) / normal_len < double(min_dot))
+            continue;
+        const Vec3d p0 = world_point(tr.verts_idxs[0]);
+        const Vec3d p1 = world_point(tr.verts_idxs[1]);
+        const Vec3d p2 = world_point(tr.verts_idxs[2]);
+        const double longest = std::max({(p1 - p0).squaredNorm(), (p2 - p1).squaredNorm(), (p0 - p2).squaredNorm()});
+        root_edge_sq.push_back(longest);
+        longest_root = std::max(longest_root, longest);
+    }
+
+    constexpr double kTargetTriangles = 500000.0;
+    auto new_triangles_at = [&](double limit_sq) -> double
+    {
+        double total = 0;
+        for (double edge_sq : root_edge_sq)
+        {
+            int depth = 0;
+            double edge = edge_sq;
+            while (edge > limit_sq && depth < 24)
+            {
+                edge *= 0.25;
+                ++depth;
+            }
+            double level = 1.0;
+            for (int i = 0; i < depth; ++i)
+                level *= 4.0;
+            total += 4.0 * (level - 1.0) / 3.0;
+            if (total > kTargetTriangles)
+                return total;
+        }
+        return total;
+    };
+
+    double edge_limit = double(max_edge_world_mm);
+    if (!root_edge_sq.empty() && new_triangles_at(edge_limit * edge_limit) > kTargetTriangles)
+    {
+        double lo = edge_limit;
+        double hi = std::sqrt(longest_root);
+        if (!(hi > lo))
+            hi = lo;
+        for (int step = 0; step < 28; ++step)
+        {
+            const double mid = 0.5 * (lo + hi);
+            if (new_triangles_at(mid * mid) > kTargetTriangles)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        edge_limit = hi;
+    }
+
+    const double max_edge_sq = edge_limit * edge_limit;
+    constexpr int max_depth = 24;
+    const size_t budget = m_triangles.size() + 800000;
+
+    std::function<void(int, Vec3i, int)> paint = [&](int facet_idx, Vec3i neighbors, int depth)
+    {
+        if (facet_idx < 0 || facet_idx >= int(m_triangles.size()))
+            return;
+        Triangle &tr = m_triangles[facet_idx];
+        if (!tr.valid())
+            return;
+        if (source_facets != nullptr &&
+            (tr.source_triangle < 0 || tr.source_triangle >= int(source_facets->size()) ||
+             (*source_facets)[tr.source_triangle] == 0))
+            return;
+
+        const Vec3f &mesh_normal = m_face_normals[tr.source_triangle];
+        Vec3d normal = normal_matrix * mesh_normal.cast<double>();
+        const double normal_len = normal.norm();
+        if (!(normal_len > 1e-12) || normal.dot(face) / normal_len < double(min_dot))
+            return;
+
+        if (tr.is_split())
+        {
+            const int children = tr.number_of_split_sides();
+            for (int child = 0; child <= children; ++child)
+            {
+                const int child_idx = m_triangles[facet_idx].children[child];
+                const Vec3i child_neighbors_idx = child_neighbors(m_triangles[facet_idx], neighbors, child);
+                paint(child_idx, child_neighbors_idx, depth + 1);
+            }
+            return;
+        }
+
+        const Vec3d p0 = world_point(tr.verts_idxs[0]);
+        const Vec3d p1 = world_point(tr.verts_idxs[1]);
+        const Vec3d p2 = world_point(tr.verts_idxs[2]);
+        const double longest = std::max({(p1 - p0).squaredNorm(), (p2 - p1).squaredNorm(), (p0 - p2).squaredNorm()});
+        if (longest > double(max_edge_sq) && depth < max_depth && m_triangles.size() < budget)
+        {
+            const TriangleStateType old_state = tr.get_state();
+            tr.set_division(3, 0);
+            perform_split(facet_idx, neighbors, old_state);
+            const int children = m_triangles[facet_idx].number_of_split_sides();
+            for (int child = 0; child <= children; ++child)
+            {
+                const int child_idx = m_triangles[facet_idx].children[child];
+                const Vec3i child_neighbors_idx = child_neighbors(m_triangles[facet_idx], neighbors, child);
+                paint(child_idx, child_neighbors_idx, depth + 1);
+            }
+            return;
+        }
+
+        const std::optional<TriangleStateType> state = sample((p0 + p1 + p2) / 3.0);
+        if (!state)
+            return;
+        m_triangles[facet_idx].set_state(*state);
+        ++assigned;
+    };
+
+    for (int facet = 0; facet < m_orig_size_indices; ++facet)
+        if (m_triangles[facet].valid())
+            paint(facet, m_neighbors[facet], 0);
+
+    for (int facet = 0; facet < m_orig_size_indices; ++facet)
+        if (m_triangles[facet].valid() && m_triangles[facet].is_split())
+            remove_useless_children(facet);
+    if (m_invalid_triangles > 0)
+        garbage_collect();
+    return assigned;
+}
+
 void TriangleSelector::remap_states(const std::function<TriangleStateType(TriangleStateType)> &remap_fn)
 {
     for (auto &tr : m_triangles)

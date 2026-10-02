@@ -12,6 +12,8 @@
 #include "libslic3r/MixedColorPalette.hpp"
 #include "slic3r/GUI/I18N.hpp"
 
+#include <optional>
+
 namespace Slic3r::GUI
 {
 
@@ -67,6 +69,26 @@ private:
     void on_opening() override;
     void on_shutdown() override;
     PainterGizmoType get_painter_type() const override;
+
+    // Picture projected onto the faces that point at the chosen side. Pixels are snapped
+    // to the virtual-color palette when the user applies it.
+    struct MappedImage
+    {
+        std::string filename;
+        int width{0};
+        int height{0};
+        std::vector<unsigned char> rgb;
+        std::vector<unsigned char> alpha;
+    };
+    bool load_mapped_image();
+    // mesh_id < 0 paints every model part in the chosen direction.
+    // A seed facet paints that face and the connected surfaces that point the same way.
+    void apply_mapped_image(int mesh_id = -1, int seed_facet = -1);
+    std::optional<MappedImage> m_mapped_image;
+    int m_image_projection{0};
+    float m_image_detail_mm{0.6f};
+    // Armed only by "Place on next click". A loaded picture does not steal paint strokes.
+    bool m_place_image_armed{false};
 
     // Palette management.
     void init_palette();

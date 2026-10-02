@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -22,6 +23,11 @@
 #include "slic3r/GUI/EventTypes.hpp"
 #include "slic3r/GUI/EventBridge.hpp"
 
+#include <wx/filedlg.h>
+#include <wx/msgdlg.h>
+
+#include <gdk-pixbuf/gdk-pixbuf.h>
+
 #if SLIC3R_OPENGL_ES
 #include <glad/gles2.h>
 #else
@@ -30,6 +36,20 @@
 
 namespace Slic3r::GUI
 {
+
+// Ordered dither over the virtual color's layer pattern. Neighboring cells take different
+// slots, so a 2-way or 3-way mix shows up as its filaments instead of one solid band.
+static int bayer_slot(int x, int y, int count)
+{
+    static constexpr int bayer[8][8] = {
+        {0, 32, 8, 40, 2, 34, 10, 42},  {48, 16, 56, 24, 50, 18, 58, 26}, {12, 44, 4, 36, 14, 46, 6, 38},
+        {60, 28, 52, 20, 62, 30, 54, 22}, {3, 35, 11, 43, 1, 33, 9, 41},  {51, 19, 59, 27, 49, 17, 57, 25},
+        {15, 47, 7, 39, 13, 45, 5, 37},  {63, 31, 55, 23, 61, 29, 53, 21},
+    };
+    if (count <= 1)
+        return 0;
+    return (bayer[y & 7][x & 7] * count) / 64;
+}
 
 TriangleStateType GLGizmoColorMixing::get_left_button_state_type() const
 {
@@ -102,6 +122,363 @@ void GLGizmoColorMixing::on_shutdown()
 {
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
+}
+
+bool GLGizmoColorMixing::load_mapped_image()
+{
+    wxFileDialog dialog(m_parent.get_wxglcanvas_parent(), _L("Select an image to map"), "", "",
+                        "Image files (*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff)|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff",
+                        wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dialog.ShowModal() != wxID_OK)
+        return false;
+
+    // wx's JPEG loader longjmps on a bad file and then calls through an uninitialized
+    // source, which is the crash. GdkPixbuf reports the failure instead.
+    // utf8_str() does not own its bytes, so the path has to stay alive as a wxString.
+    const wxString file_path = dialog.GetPath();
+    const std::string utf8 = file_path.utf8_string();
+    GError *error = nullptr;
+    GdkPixbuf *pixels = gdk_pixbuf_new_from_file_at_scale(utf8.c_str(), 512, 512, TRUE, &error);
+    if (pixels == nullptr)
+    {
+        const wxString message = error ? wxString::FromUTF8(error->message) : _L("Could not load that image.");
+        if (error)
+            g_error_free(error);
+        wxMessageBox(message, _L("Map image"), wxOK | wxICON_ERROR);
+        return false;
+    }
+
+    const int width = gdk_pixbuf_get_width(pixels);
+    const int height = gdk_pixbuf_get_height(pixels);
+    const int channels = gdk_pixbuf_get_n_channels(pixels);
+    const int stride = gdk_pixbuf_get_rowstride(pixels);
+    const bool usable = gdk_pixbuf_get_colorspace(pixels) == GDK_COLORSPACE_RGB && width > 0 && height > 0 &&
+                        (channels == 3 || channels == 4) && gdk_pixbuf_get_bits_per_sample(pixels) == 8;
+    if (!usable)
+    {
+        g_object_unref(pixels);
+        wxMessageBox(_L("Could not load that image."), _L("Map image"), wxOK | wxICON_ERROR);
+        return false;
+    }
+
+    MappedImage mapped;
+    mapped.filename = dialog.GetFilename().ToStdString();
+    mapped.width = width;
+    mapped.height = height;
+    const size_t count = size_t(width) * size_t(height);
+    mapped.rgb.resize(count * 3);
+    if (channels == 4)
+        mapped.alpha.resize(count);
+    const guint8 *src = gdk_pixbuf_get_pixels(pixels);
+    for (int y = 0; y < height; ++y)
+    {
+        const guint8 *row = src + size_t(y) * size_t(stride);
+        for (int x = 0; x < width; ++x)
+        {
+            const guint8 *pixel = row + size_t(x) * size_t(channels);
+            const size_t index = size_t(y) * size_t(width) + size_t(x);
+            mapped.rgb[index * 3] = pixel[0];
+            mapped.rgb[index * 3 + 1] = pixel[1];
+            mapped.rgb[index * 3 + 2] = pixel[2];
+            if (channels == 4)
+                mapped.alpha[index] = pixel[3];
+        }
+    }
+    g_object_unref(pixels);
+    m_mapped_image = std::move(mapped);
+    m_parent.set_as_dirty();
+    return true;
+}
+
+void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
+{
+    if (!m_mapped_image || m_triangle_selectors.empty())
+        return;
+    if (m_palette.colors().empty())
+    {
+        m_parent.get_notification_manager()->push_notification(
+            _u8L("Load filaments before mapping an image. The picture is matched to those virtual colors."));
+        return;
+    }
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr || mo->instances.empty())
+        return;
+
+    const MappedImage &image = *m_mapped_image;
+    const std::vector<MixedColor> &palette_colors = m_palette.colors();
+    // Pure entries are the physical filaments. A mix is painted as those filaments, in the
+    // same ratio as its layer pattern, so the picture is visible on one layer.
+    std::vector<int> filament_state(m_filament_optics.size(), -1);
+    for (size_t i = 0; i < m_palette.num_pure_filaments() && i < palette_colors.size(); ++i)
+    {
+        const std::vector<int> &pattern = palette_colors[i].layer_pattern;
+        if (pattern.empty())
+            continue;
+        const int filament = pattern.front();
+        if (filament >= 0 && filament < int(filament_state.size()) && filament_state[size_t(filament)] < 0)
+            filament_state[size_t(filament)] = int(i);
+    }
+    std::vector<int> quantized(size_t(image.width) * size_t(image.height), -1);
+    for (int i = 0; i < image.width * image.height; ++i)
+    {
+        if (!image.alpha.empty() && image.alpha[size_t(i)] < 128)
+            continue;
+        const unsigned char *px = image.rgb.data() + size_t(i) * 3;
+        const uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
+        const int palette_idx = m_palette.find_best_match(rgb);
+        if (palette_idx < 0 || palette_idx >= int(palette_colors.size()))
+            continue;
+        const std::vector<int> &pattern = palette_colors[size_t(palette_idx)].layer_pattern;
+        if (pattern.empty())
+        {
+            quantized[size_t(i)] = palette_idx;
+            continue;
+        }
+        const int x = i % image.width;
+        const int y = i / image.width;
+        const int filament = pattern[size_t(bayer_slot(x, y, int(pattern.size())))];
+        const int pure = (filament >= 0 && filament < int(filament_state.size())) ? filament_state[size_t(filament)]
+                                                                                    : -1;
+        quantized[size_t(i)] = pure >= 0 ? pure : palette_idx;
+    }
+
+    int instance_idx = m_parent.get_selection().get_instance_idx();
+    if (instance_idx < 0 || instance_idx >= int(mo->instances.size()))
+        instance_idx = 0;
+
+    struct Projection
+    {
+        Vec3d face;
+        Vec3d right;
+        Vec3d up;
+    };
+    const Camera &camera = m_parent.get_camera();
+    Projection projection;
+    std::vector<unsigned char> facet_mask;
+    const bool place_on_face = mesh_id >= 0 && seed_facet >= 0;
+    float min_dot = 0.35f;
+    if (place_on_face)
+    {
+        const ModelVolume *target = nullptr;
+        int part_index = -1;
+        for (const ModelVolume *mv : mo->volumes)
+        {
+            if (!mv->is_model_part())
+                continue;
+            ++part_index;
+            if (part_index == mesh_id)
+            {
+                target = mv;
+                break;
+            }
+        }
+        if (target == nullptr)
+        {
+            m_parent.get_notification_manager()->push_notification(_u8L("Click a face of the model."));
+            return;
+        }
+        const indexed_triangle_set &its = target->mesh().its;
+        if (seed_facet >= int(its.indices.size()))
+        {
+            m_parent.get_notification_manager()->push_notification(_u8L("Click a face of the model."));
+            return;
+        }
+        const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * target->get_matrix();
+        if (std::abs(trafo.linear().determinant()) < 1e-18)
+            return;
+        const Eigen::Matrix3d normal_matrix = trafo.linear().inverse().transpose();
+        const std::vector<Vec3f> face_normals = its_face_normals(its);
+        const auto world_normal = [&](size_t face) -> Vec3d
+        {
+            Vec3d normal = normal_matrix * face_normals[face].cast<double>();
+            const double length = normal.norm();
+            if (length <= 1e-12)
+                return Vec3d::Zero();
+            normal /= length;
+            return normal;
+        };
+        const Vec3d seed_normal = world_normal(size_t(seed_facet));
+        if (seed_normal.squaredNorm() < 0.5)
+            return;
+
+        const Vec3d camera_right = camera.get_dir_right();
+        const Vec3d camera_up = camera.get_dir_up();
+        Vec3d right = camera_right - seed_normal * seed_normal.dot(camera_right);
+        if (right.squaredNorm() < 1e-8)
+        {
+            const Vec3d hint = std::abs(seed_normal.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX();
+            right = hint.cross(seed_normal);
+        }
+        right.normalize();
+        Vec3d up = camera_up - seed_normal * seed_normal.dot(camera_up);
+        up -= right * up.dot(right);
+        if (up.squaredNorm() < 1e-8)
+            up = seed_normal.cross(right);
+        up.normalize();
+        projection = {seed_normal, right, up};
+
+        // 35 degrees from the clicked face. A flat side is kept whole; a curve stays a local patch.
+        const double min_align = std::cos(35.0 * 0.017453292519943295);
+        const std::vector<Vec3i> neighbors = its_face_neighbors(its);
+        facet_mask.assign(its.indices.size(), 0);
+        std::vector<int> pending;
+        pending.push_back(seed_facet);
+        facet_mask[size_t(seed_facet)] = 1;
+        while (!pending.empty())
+        {
+            const int face = pending.back();
+            pending.pop_back();
+            if (face < 0 || face >= int(neighbors.size()))
+                continue;
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int next = neighbors[size_t(face)][corner];
+                if (next < 0 || next >= int(facet_mask.size()) || facet_mask[size_t(next)] != 0)
+                    continue;
+                if (world_normal(size_t(next)).dot(seed_normal) < min_align)
+                    continue;
+                facet_mask[size_t(next)] = 1;
+                pending.push_back(next);
+            }
+        }
+        min_dot = 0.5f;
+    }
+    else
+    {
+        switch (m_image_projection)
+        {
+        case 2:
+            projection = {Vec3d::UnitZ(), Vec3d::UnitX(), Vec3d::UnitY()};
+            break;
+        case 3:
+            projection = {-Vec3d::UnitZ(), Vec3d::UnitX(), Vec3d::UnitY()};
+            break;
+        case 4:
+            projection = {-Vec3d::UnitY(), Vec3d::UnitX(), Vec3d::UnitZ()};
+            break;
+        case 5:
+            projection = {Vec3d::UnitY(), -Vec3d::UnitX(), Vec3d::UnitZ()};
+            break;
+        case 6:
+            projection = {-Vec3d::UnitX(), Vec3d::UnitY(), Vec3d::UnitZ()};
+            break;
+        case 7:
+            projection = {Vec3d::UnitX(), -Vec3d::UnitY(), Vec3d::UnitZ()};
+            break;
+        default:
+            projection = {-camera.get_dir_forward(), camera.get_dir_right(), camera.get_dir_up()};
+            break;
+        }
+        if (projection.face.squaredNorm() < 1e-12)
+            return;
+        projection.face.normalize();
+        projection.right.normalize();
+        projection.up.normalize();
+    }
+
+    const auto project_bounds = [&](const Transform3d &trafo, const indexed_triangle_set &its, double &umin,
+                                     double &umax, double &vmin, double &vmax) -> bool
+    {
+        if (std::abs(trafo.linear().determinant()) < 1e-18)
+            return false;
+        const Eigen::Matrix3d normals = trafo.linear().inverse().transpose();
+        const std::vector<Vec3f> face_normals = its_face_normals(its);
+        umin = std::numeric_limits<double>::infinity();
+        umax = -umin;
+        vmin = umin;
+        vmax = umax;
+        bool any = false;
+        for (size_t face = 0; face < its.indices.size(); ++face)
+        {
+            if (!facet_mask.empty() && (face >= facet_mask.size() || facet_mask[face] == 0))
+                continue;
+            Vec3d normal = normals * face_normals[face].cast<double>();
+            const double length = normal.norm();
+            if (!(length > 1e-12) || normal.dot(projection.face) / length < double(min_dot))
+                continue;
+            const Vec3i &tri = its.indices[face];
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const Vec3d world = trafo * its.vertices[tri[corner]].cast<double>();
+                const double u = world.dot(projection.right);
+                const double v = world.dot(projection.up);
+                umin = std::min(umin, u);
+                umax = std::max(umax, u);
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+                any = true;
+            }
+        }
+        return any && umax - umin > 1e-4 && vmax - vmin > 1e-4;
+    };
+
+    int selector_idx = -1;
+    bool any_surface = false;
+    for (const ModelVolume *mv : mo->volumes)
+    {
+        if (!mv->is_model_part())
+            continue;
+        ++selector_idx;
+        if (selector_idx >= int(m_triangle_selectors.size()))
+            break;
+        if (place_on_face && selector_idx != mesh_id)
+            continue;
+        const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
+        double umin, umax, vmin, vmax;
+        if (project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
+            any_surface = true;
+    }
+    if (!any_surface)
+    {
+        m_parent.get_notification_manager()->push_notification(
+            place_on_face ? _u8L("That face is too small to place the image on.")
+                          : _u8L("No surface faces that direction. Aim the view, or pick another side."));
+        return;
+    }
+
+    m_place_image_armed = false;
+    m_parent.take_gizmo_snapshot(_u8L("Map image"));
+    int assigned = 0;
+    selector_idx = -1;
+    for (const ModelVolume *mv : mo->volumes)
+    {
+        if (!mv->is_model_part())
+            continue;
+        ++selector_idx;
+        if (selector_idx >= int(m_triangle_selectors.size()))
+            break;
+        if (place_on_face && selector_idx != mesh_id)
+            continue;
+        const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
+        double umin, umax, vmin, vmax;
+        if (!project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
+            continue;
+        const double u_span = umax - umin;
+        const double v_span = vmax - vmin;
+        assigned += m_triangle_selectors[selector_idx]->paint_planar_image(
+            trafo, projection.face, min_dot, m_image_detail_mm,
+            [&](const Vec3d &world_point) -> std::optional<TriangleStateType>
+            {
+                const double u = (world_point.dot(projection.right) - umin) / u_span;
+                const double v = (world_point.dot(projection.up) - vmin) / v_span;
+                if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0)
+                    return std::nullopt;
+                const int x = std::clamp(int(std::lround(u * (image.width - 1))), 0, image.width - 1);
+                const int y = std::clamp(int(std::lround((1.0 - v) * (image.height - 1))), 0, image.height - 1);
+                const int palette_idx = quantized[size_t(y * image.width + x)];
+                if (palette_idx < 0)
+                    return std::nullopt;
+                return TriangleStateType(palette_idx + 1);
+            },
+            facet_mask.empty() ? nullptr : &facet_mask);
+        m_triangle_selectors[selector_idx]->request_update_render_data();
+    }
+
+    update_model_object();
+    m_parent.set_as_dirty();
+    if (assigned == 0)
+        m_parent.get_notification_manager()->push_notification(
+            _u8L("The image did not cover any facing surface. Transparent pixels are left unpainted."));
 }
 
 std::string GLGizmoColorMixing::on_get_name() const
@@ -236,6 +613,27 @@ bool GLGizmoColorMixing::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
 {
     const bool is_pick = alt_down && !shift_down && !control_down &&
                          (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown);
+    // Placement is a separate one-shot. Loading a picture must not turn paint clicks into it.
+    const bool place_image = m_place_image_armed && m_mapped_image && m_image_projection == 0 && !alt_down &&
+                             !control_down && action == SLAGizmoEventType::LeftDown;
+    if (place_image)
+    {
+        if (m_triangle_selectors.empty())
+            return true;
+        const Selection &selection = m_parent.get_selection();
+        const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+        if (!mo || selection.get_instance_idx() < 0)
+            return true;
+        const ModelInstance *mi = mo->instances[selection.get_instance_idx()];
+        std::vector<Transform3d> trafo_matrices;
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv->is_model_part())
+                trafo_matrices.emplace_back(mi->get_transformation().get_matrix() * mv->get_matrix());
+        update_raycast_cache(mouse_position, m_parent.get_camera(), trafo_matrices);
+        if (m_rr.mesh_id >= 0 && m_rr.mesh_id < int(m_triangle_selectors.size()))
+            apply_mapped_image(m_rr.mesh_id, int(m_rr.facet));
+        return true;
+    }
     if (!is_pick)
         return GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
 
@@ -510,10 +908,11 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
     // filament instead of the blend. The base-layer behavior is configured separately in Print
     // Settings, so it isn't called out here. ---
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("%s", _u8L("Color blends on near-vertical walls by changing filament each layer. "
-                                   "A top face of a 2-way or 3-way color dithers those filaments along the "
-                                   "infill lines and the walls around that top, in the same proportion. "
-                                   "Steep overhangs may still show one filament.")
+    ImGui::TextDisabled("%s", _u8L("Color blends on near-vertical walls by changing filament each layer "
+                                   "and pulling a low-share layer's outer wall inward so the color "
+                                   "underneath stays visible. A top face of a 2-way or 3-way color dithers "
+                                   "those filaments along the infill lines and the walls around that top, "
+                                   "in the same proportion. Steep overhangs may still show one filament.")
                                   .c_str());
     ImGui::PopTextWrapPos();
 
@@ -740,6 +1139,65 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         }
 
         ImGui::Separator();
+    }
+
+    ImGui::Separator();
+    ImGuiPureWrap::text(_u8L("Map image"));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s",
+                        m_image_projection == 0
+                            ? _u8L("Place on next click, then click a face. Brush painting stays "
+                                   "available until you do. The picture uses the filaments of the "
+                                   "closest virtual color, mixed across the surface. Connected "
+                                   "surfaces that point the same way are included. Transparent parts "
+                                   "of a PNG are left unpainted.")
+                                  .c_str()
+                            : _u8L("Projects a picture onto the surfaces that face the chosen side. "
+                                   "The picture uses the filaments of the closest virtual color, "
+                                   "mixed across the surface. Transparent parts of a PNG are left "
+                                   "unpainted.")
+                                  .c_str());
+    ImGui::PopTextWrapPos();
+    // The file dialog cannot open inside this draw. A mouse-up redraw is what called us,
+    // and a modal dialog from here re-enters that redraw.
+    if (ImGuiPureWrap::button(m_mapped_image ? _u8L("Change image") : _u8L("Load image")))
+    {
+        static bool load_pending = false;
+        if (!load_pending)
+        {
+            load_pending = true;
+            wxWindow *parent = m_parent.get_wxglcanvas_parent();
+            parent->CallAfter([this]()
+                              {
+                                  this->load_mapped_image();
+                                  load_pending = false;
+                              });
+        }
+    }
+    if (m_mapped_image)
+    {
+        ImGui::SameLine();
+        ImGuiPureWrap::text(m_mapped_image->filename);
+        const std::vector<std::string> projections = {_u8L("Clicked face"), _u8L("Current view"), _u8L("Top"),
+                                                      _u8L("Bottom"),       _u8L("Front"),        _u8L("Back"),
+                                                      _u8L("Left"),         _u8L("Right")};
+        if (ImGuiPureWrap::combo(_u8L("Side"), projections, m_image_projection, 0, 0.0f, slider_width) &&
+            m_image_projection != 0)
+            m_place_image_armed = false;
+        ImGui::AlignTextToFramePadding();
+        ImGuiPureWrap::text(_u8L("Detail"));
+        ImGui::SameLine();
+        ImGui::PushItemWidth(slider_width);
+        m_imgui->slider_float("##image_detail", &m_image_detail_mm, 0.3f, 4.0f, "%.2f mm", 1.0f, true,
+                              _u8L("Smaller follows the picture more closely"));
+        if (m_image_projection == 0)
+        {
+            if (ImGuiPureWrap::button(m_place_image_armed ? _u8L("Click the model… (cancel)")
+                                                         : _u8L("Place on next click")))
+                m_place_image_armed = !m_place_image_armed;
+        }
+        else if (ImGuiPureWrap::button(_u8L("Apply image")))
+            apply_mapped_image();
     }
 
     ImGui::Separator();

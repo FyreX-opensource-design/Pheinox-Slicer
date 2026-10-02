@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include <cassert>
@@ -466,6 +467,17 @@ public:
 
     // Set facet of the mesh to a given state. Only works for original triangles.
     void set_facet(int facet_idx, TriangleStateType state);
+
+    // Project a picture onto the surfaces that face `face_outward` (world space).
+    // Triangles are split until edges are about `max_edge_world_mm`, then each leaf is
+    // colored by `sample`. nullopt leaves that leaf as it was. Faces whose normal is
+    // not within `min_dot` of `face_outward` are skipped, so the back of the model stays
+    // unpainted. Returns how many leaves were assigned a color.
+    // `source_facets`, when set, is one flag per original triangle. Only those triangles are painted.
+    int paint_planar_image(
+        const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
+        const std::function<std::optional<TriangleStateType>(const Vec3d &world_point)> &sample,
+        const std::vector<unsigned char> *source_facets = nullptr);
 
     // Remap all triangle states using a mapping function. Used to compact color mixing
     // states to a small contiguous range for efficient segmentation.

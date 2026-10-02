@@ -12,6 +12,7 @@
 #include "Layer.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -810,6 +811,277 @@ inline bool has_compatible_layer_regions(const PrintRegionConfig &config, const 
 // Here the perimeters are created cummulatively for all layer regions sharing the same parameters influencing the perimeters.
 // The perimeter paths and the thin fills (ExtrusionEntityCollection) are assigned to the first compatible layer region.
 // The resulting fill surface is split back among the originating regions.
+namespace
+{
+
+// Kuipers-style side blend for a painted 2-way or 3-way mix. The layer already
+// prints one filament. Its share of the recipe sets how far the outer wall
+// recedes: a full share stays at the surface, a small share pulls inward so
+// the prouder layer underneath stays visible. The inner edge of the bead does
+// not move.
+struct ColorMixOverhangJob
+{
+    const ExPolygons *area;
+    const std::vector<int> *pattern;
+};
+
+bool point_in_expolygons(const ExPolygons &area, const Point &point)
+{
+    for (const ExPolygon &polygon : area)
+        if (polygon.contains(point, false))
+            return true;
+    return false;
+}
+
+int overhang_job_at(const Point &point, const std::vector<ColorMixOverhangJob> &jobs, int filament)
+{
+    for (size_t i = 0; i < jobs.size(); ++i)
+    {
+        bool used = false;
+        for (int slot : *jobs[i].pattern)
+            if (slot == filament)
+            {
+                used = true;
+                break;
+            }
+        if (used && point_in_expolygons(*jobs[i].area, point))
+            return int(i);
+    }
+    return -1;
+}
+
+float filament_share(const std::vector<int> &pattern, int filament)
+{
+    if (pattern.empty())
+        return 1.f;
+    int hits = 0;
+    for (int slot : pattern)
+        if (slot == filament)
+            ++hits;
+    return float(hits) / float(pattern.size());
+}
+
+bool probe_outside(const Point &origin, const Vec2d &direction, double distance_mm, const ExPolygons &slices)
+{
+    const Point probe(origin.x() + coord_t(std::llround(direction.x() * scale_(distance_mm))),
+                      origin.y() + coord_t(std::llround(direction.y() * scale_(distance_mm))));
+    return !point_in_expolygons(slices, probe);
+}
+
+Vec2d outward_normal(const Point &from, const Point &to, const ExPolygons &slices)
+{
+    const double dx = double(to.x() - from.x());
+    const double dy = double(to.y() - from.y());
+    const double length = std::hypot(dx, dy);
+    if (length < 1.0)
+        return Vec2d::Zero();
+    const Vec2d right(dy / length, -dx / length);
+    const Point mid(coord_t(std::llround((double(from.x()) + double(to.x())) * 0.5)),
+                    coord_t(std::llround((double(from.y()) + double(to.y())) * 0.5)));
+    const bool right_out = probe_outside(mid, right, 2.0, slices);
+    const bool left_out = probe_outside(mid, Vec2d(-right.x(), -right.y()), 2.0, slices);
+    if (right_out && !left_out)
+        return right;
+    if (left_out && !right_out)
+        return Vec2d(-right.x(), -right.y());
+    // Contours travel counterclockwise, so the right-hand side is outside.
+    return right;
+}
+
+void shift_polyline_outward(Polyline &polyline, float outward_mm, const ExPolygons &slices)
+{
+    if (polyline.size() < 2 || std::abs(outward_mm) < 1e-4f)
+        return;
+    const double distance = scale_(double(outward_mm));
+    const bool closed = polyline.points.front() == polyline.points.back();
+    std::vector<Vec2d> normals(polyline.size(), Vec2d::Zero());
+    const size_t segment_count = closed ? polyline.size() - 1 : polyline.size();
+    for (size_t i = 1; i < segment_count; ++i)
+    {
+        const Vec2d normal = outward_normal(polyline.points[i - 1], polyline.points[i], slices);
+        normals[i - 1] += normal;
+        normals[i] += normal;
+    }
+    if (closed && polyline.size() > 2)
+    {
+        const Vec2d normal = outward_normal(polyline.points[polyline.size() - 2], polyline.points.back(), slices);
+        normals[polyline.size() - 2] += normal;
+        normals.front() += normal;
+        normals.back() = normals.front();
+    }
+    for (size_t i = 0; i < polyline.size(); ++i)
+    {
+        const double length = normals[i].norm();
+        if (length < 1e-8)
+            continue;
+        normals[i] /= length;
+        polyline.points[i].x() += coord_t(std::llround(normals[i].x() * distance));
+        polyline.points[i].y() += coord_t(std::llround(normals[i].y() * distance));
+    }
+}
+
+struct OverhangRun
+{
+    Polyline polyline;
+    int job{-1};
+};
+
+std::vector<OverhangRun> split_overhang_runs(const Polyline &polyline, const std::vector<ColorMixOverhangJob> &jobs,
+                                             int filament)
+{
+    std::vector<Point> samples;
+    samples.reserve(polyline.size());
+    samples.push_back(polyline.points.front());
+    for (size_t i = 1; i < polyline.size(); ++i)
+    {
+        const Point &from = polyline.points[i - 1];
+        const Point &to = polyline.points[i];
+        const double length_mm = unscale<double>(std::hypot(double(to.x() - from.x()), double(to.y() - from.y())));
+        const int steps = std::max(1, int(std::ceil(length_mm)));
+        for (int step = 1; step <= steps; ++step)
+        {
+            if (step == steps)
+                samples.push_back(to);
+            else
+                samples.emplace_back(
+                    coord_t(std::llround(double(from.x()) + double(to.x() - from.x()) * step / steps)),
+                    coord_t(std::llround(double(from.y()) + double(to.y() - from.y()) * step / steps)));
+        }
+    }
+
+    std::vector<OverhangRun> runs;
+    OverhangRun current;
+    current.job = overhang_job_at(samples.front(), jobs, filament);
+    current.polyline.points.push_back(samples.front());
+    for (size_t i = 1; i < samples.size(); ++i)
+    {
+        const int job = overhang_job_at(samples[i], jobs, filament);
+        if (job != current.job)
+        {
+            current.polyline.points.push_back(samples[i]);
+            if (current.polyline.size() >= 2)
+                runs.push_back(std::move(current));
+            current = OverhangRun{};
+            current.job = job;
+            current.polyline.points.push_back(samples[i]);
+        }
+        else
+            current.polyline.points.push_back(samples[i]);
+    }
+    if (current.polyline.size() >= 2)
+        runs.push_back(std::move(current));
+    return runs;
+}
+
+void recess_outer_wall(ExtrusionPath &path, float weight, float nozzle_mm, const ExPolygons &slices)
+{
+    const float nominal = path.width();
+    if (!(nominal > 0.05f))
+        return;
+    const float max_recede = std::min(nominal * 0.65f, nozzle_mm * 0.75f);
+    const float recede = max_recede * (1.f - std::clamp(weight, 0.f, 1.f));
+    const float new_width = std::max(nominal * 0.35f, nominal - recede);
+    if (nominal - new_width <= 0.02f)
+        return;
+    shift_polyline_outward(path.polyline, -0.5f * (nominal - new_width), slices);
+    path.attributes().width = new_width;
+    path.attributes().mm3_per_mm *= double(new_width / nominal);
+}
+
+// True when `path` must be replaced by `out`. A uniform wall is edited in place.
+bool modulate_outer_wall(ExtrusionPath &path, std::vector<ExtrusionPath> &out,
+                         const std::vector<ColorMixOverhangJob> &jobs, int filament, float nozzle_mm,
+                         const ExPolygons &slices)
+{
+    out.clear();
+    if (!path.role().is_external_perimeter() || path.role().is_bridge() || path.polyline.size() < 2)
+        return false;
+    const auto runs = split_overhang_runs(path.polyline, jobs, filament);
+    bool painted = false;
+    for (const OverhangRun &run : runs)
+        if (run.job >= 0)
+            painted = true;
+    if (!painted)
+        return false;
+
+    if (runs.size() == 1)
+    {
+        recess_outer_wall(path, filament_share(*jobs[runs.front().job].pattern, filament), nozzle_mm, slices);
+        return false;
+    }
+
+    out.reserve(runs.size());
+    for (const OverhangRun &run : runs)
+    {
+        ExtrusionPath piece(run.polyline, path.attributes());
+        if (run.job >= 0)
+            recess_outer_wall(piece, filament_share(*jobs[run.job].pattern, filament), nozzle_mm, slices);
+        out.push_back(std::move(piece));
+    }
+    return true;
+}
+
+bool modulate_wall_paths(ExtrusionPaths &paths, std::vector<ExtrusionPath> &out,
+                         const std::vector<ColorMixOverhangJob> &jobs, int filament, float nozzle_mm,
+                         const ExPolygons &slices)
+{
+    bool split = false;
+    std::vector<ExtrusionPath> produced;
+    for (ExtrusionPath &path : paths)
+    {
+        std::vector<ExtrusionPath> pieces;
+        if (modulate_outer_wall(path, pieces, jobs, filament, nozzle_mm, slices))
+        {
+            split = true;
+            for (ExtrusionPath &piece : pieces)
+                produced.push_back(std::move(piece));
+        }
+        else
+            produced.push_back(path);
+    }
+    if (split)
+        out = std::move(produced);
+    return split;
+}
+
+void apply_color_mix_overhang_collection(ExtrusionEntityCollection &collection,
+                                         const std::vector<ColorMixOverhangJob> &jobs, int filament, float nozzle_mm,
+                                         const ExPolygons &slices)
+{
+    ExtrusionEntitiesPtr kept;
+    kept.reserve(collection.entities.size());
+    for (ExtrusionEntity *entity : collection.entities)
+    {
+        if (auto *child = dynamic_cast<ExtrusionEntityCollection *>(entity))
+        {
+            apply_color_mix_overhang_collection(*child, jobs, filament, nozzle_mm, slices);
+            kept.push_back(entity);
+            continue;
+        }
+
+        std::vector<ExtrusionPath> pieces;
+        bool split = false;
+        if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity))
+            split = modulate_wall_paths(loop->paths, pieces, jobs, filament, nozzle_mm, slices);
+        else if (auto *multi = dynamic_cast<ExtrusionMultiPath *>(entity))
+            split = modulate_wall_paths(multi->paths, pieces, jobs, filament, nozzle_mm, slices);
+        else if (auto *path = dynamic_cast<ExtrusionPath *>(entity))
+            split = modulate_outer_wall(*path, pieces, jobs, filament, nozzle_mm, slices);
+
+        if (!split)
+        {
+            kept.push_back(entity);
+            continue;
+        }
+        delete entity;
+        for (ExtrusionPath &piece : pieces)
+            kept.push_back(new ExtrusionPath(std::move(piece)));
+    }
+    collection.entities.swap(kept);
+}
+
+} // namespace
+
 void Layer::make_perimeters()
 {
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id();
@@ -1006,6 +1278,29 @@ void Layer::make_perimeters()
     }
 
     this->check_generated_widths_against_warning(true);
+
+    if (!this->color_mix_top_stripes.empty())
+    {
+        std::vector<ColorMixOverhangJob> jobs;
+        jobs.reserve(this->color_mix_top_stripes.size());
+        for (const ColorMixTopStripe &stripe : this->color_mix_top_stripes)
+            if (stripe.pattern.size() >= 2 && !stripe.area.empty())
+                jobs.push_back(ColorMixOverhangJob{&stripe.area, &stripe.pattern});
+        if (!jobs.empty())
+        {
+            const ConfigOptionFloats &nozzles = this->object()->print()->config().nozzle_diameter;
+            for (LayerRegion *region : m_regions)
+            {
+                const int filament = region->region().config().perimeter_extruder.value - 1;
+                if (filament < 0 || region->m_perimeters.empty())
+                    continue;
+                const float nozzle_mm = nozzles.values.empty()
+                                            ? 0.4f
+                                            : float(nozzles.values[size_t(std::min(filament, int(nozzles.values.size()) - 1))]);
+                apply_color_mix_overhang_collection(region->m_perimeters, jobs, filament, nozzle_mm, this->lslices);
+            }
+        }
+    }
 
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id() << " - Done";
 }
