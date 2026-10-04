@@ -7,6 +7,8 @@
 
 #include "GLGizmoPainterBase.hpp"
 
+#include "PaintBrushLibrary.hpp"
+
 #include "libslic3r/Color.hpp"
 #include "libslic3r/FilamentOptics.hpp"
 #include "libslic3r/MixedColorPalette.hpp"
@@ -89,6 +91,16 @@ private:
     float m_image_detail_mm{0.6f};
     // Armed only by "Place on next click". A loaded picture does not steal paint strokes.
     bool m_place_image_armed{false};
+
+    // Installed Krita presets and GIMP/Krita brush tips. Index 0 in the popup is the solid brush.
+    void refresh_brush_catalog();
+    bool stamp_paint_brush(const Vec2d &mouse_position, bool second_color, bool clear_to_default, bool hard_clear);
+    std::vector<PaintBrushEntry> m_brush_entries;
+    std::vector<std::string> m_brush_labels;
+    int m_brush_choice{0};
+    std::optional<PaintBrushTip> m_brush_tip;
+    Vec2d m_brush_stamp_cursor{Vec2d::Zero()};
+    bool m_brush_stamp_valid{false};
 
     // Palette management.
     void init_palette();

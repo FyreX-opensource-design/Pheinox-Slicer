@@ -23,6 +23,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -194,7 +195,7 @@ void GLGizmoPainterBase::render_cursor_circle()
 
     const Vec2d center = m_parent.get_local_mouse_position();
     const float zoom = float(m_parent.get_camera().get_zoom());
-    const float radius = m_cursor_radius * zoom;
+    const float radius = effective_brush_radius() * zoom;
 
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
@@ -334,7 +335,7 @@ void GLGizmoPainterBase::render_cursor_sphere(const Transform3d &trafo) const
     Transform3d view_model_matrix = camera.get_view_matrix() * trafo *
                                     Geometry::translation_transform(m_rr.hit.cast<double>()) *
                                     complete_scaling_matrix_inverse *
-                                    Geometry::scale_transform(m_cursor_radius * Vec3d::Ones());
+                                    Geometry::scale_transform(effective_brush_radius() * Vec3d::Ones());
 
     shader->set_uniform("view_model_matrix", view_model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
@@ -888,7 +889,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
                     const ProjectedMousePosition &first_position = projected_mouse_positions.front();
                     std::unique_ptr<TriangleSelector::Cursor> cursor =
                         TriangleSelector::SinglePointCursor::cursor_factory(first_position.mesh_hit, camera_pos,
-                                                                            m_cursor_radius, m_cursor_type,
+                                                                            effective_brush_radius(), m_cursor_type,
                                                                             trafo_matrix, clp);
                     m_triangle_selectors[mesh_idx]->select_patch(int(first_position.facet_idx), std::move(cursor),
                                                                  new_state, trafo_matrix_not_translate,
@@ -906,7 +907,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
                         std::unique_ptr<TriangleSelector::Cursor> cursor =
                             TriangleSelector::DoublePointCursor::cursor_factory(first_position_it->mesh_hit,
                                                                                 second_position_it->mesh_hit,
-                                                                                camera_pos, m_cursor_radius,
+                                                                                camera_pos, effective_brush_radius(),
                                                                                 m_cursor_type, trafo_matrix, clp);
                         m_triangle_selectors[mesh_idx]->select_patch(
                             int(first_position_it->facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
@@ -1029,8 +1030,30 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
     return false;
 }
 
+float GLGizmoPainterBase::effective_brush_radius() const
+{
+    if (m_stylus_pressure < 0.f || m_tool_type != ToolType::BRUSH)
+        return m_cursor_radius;
+    if (m_cursor_type != TriangleSelector::CursorType::CIRCLE &&
+        m_cursor_type != TriangleSelector::CursorType::SPHERE)
+        return m_cursor_radius;
+    // Hover with no contact still shows the slider size, so the pen can be aimed.
+    if (m_button_down == Button::None && m_stylus_pressure < 0.02f)
+        return m_cursor_radius;
+
+    const float pressure = std::clamp(m_stylus_pressure, 0.f, 1.f);
+    const float min_radius = this->get_cursor_radius_min();
+    return min_radius + (m_cursor_radius - min_radius) * pressure;
+}
+
 bool GLGizmoPainterBase::on_mouse(const MouseInput &mouse)
 {
+    if (!mouse.stylus)
+        m_stylus_pressure = -1.f;
+    else if (mouse.pressure >= 0.f)
+        m_stylus_pressure = mouse.pressure;
+    m_stylus_eraser = mouse.eraser;
+
     Vec2i mouse_coord((int) mouse.x, (int) mouse.y);
     Vec2d mouse_pos = mouse_coord.cast<double>();
 
@@ -1567,7 +1590,7 @@ void GLGizmoPainterBase::draw_line_between_points(const Vec3f &start, const Vec3
 
     // Use DoublePointCursor to paint between points
     std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::DoublePointCursor::cursor_factory(
-        start, end, camera.get_position().cast<float>(), m_cursor_radius, m_cursor_type, trafo_matrix, clp);
+        start, end, camera.get_position().cast<float>(), effective_brush_radius(), m_cursor_type, trafo_matrix, clp);
 
     m_triangle_selectors[mesh_idx]->select_patch(int(m_line_start_facet_idx), std::move(cursor), new_state,
                                                  trafo_matrix_not_translate, m_triangle_splitting_enabled,

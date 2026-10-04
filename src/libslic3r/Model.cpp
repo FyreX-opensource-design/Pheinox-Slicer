@@ -2202,9 +2202,37 @@ void ensure_color_mixing_recipes_for_used_states(const MixedColorPalette &palett
         uint32_t new_rgb = 0;
         if (i < palette.colors().size())
             new_rgb = rgb_from_predicted(palette.colors()[i].predicted_color);
-        if (rec.rgb == new_rgb)
-            continue;
-        rec.rgb = new_rgb;
+        if (rec.rgb != new_rgb)
+            rec.rgb = new_rgb;
+
+        if (i < palette.colors().size() && palette.colors()[i].coextruded)
+        {
+            const MixedColor &mc = palette.colors()[i];
+            int slots[3] = {-1, -1, -1};
+            int count = 0;
+            for (int tool : mc.layer_pattern)
+            {
+                bool seen = false;
+                for (int k = 0; k < count; ++k)
+                    if (slots[k] == tool)
+                        seen = true;
+                if (seen)
+                    continue;
+                if (count >= 3)
+                    break;
+                slots[count++] = tool;
+            }
+            rec.coex_count = (count == 2 || count == 3) ? (uint8_t) count : 0;
+            for (int k = 0; k < 3; ++k)
+                rec.coex_extruders[k] = (int8_t) slots[k];
+            rec.coex_rotation_deg = mc.coex_rotation_deg;
+        }
+        else
+        {
+            rec.coex_count = 0;
+            rec.coex_extruders[0] = rec.coex_extruders[1] = rec.coex_extruders[2] = -1;
+            rec.coex_rotation_deg = 0.f;
+        }
     }
 }
 

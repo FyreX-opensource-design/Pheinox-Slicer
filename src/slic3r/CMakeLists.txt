@@ -106,6 +106,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoCounterboreBridge.hpp
     GUI/Gizmos/GLGizmoColorMixing.cpp
     GUI/Gizmos/GLGizmoColorMixing.hpp
+    GUI/Gizmos/PaintBrushLibrary.cpp
+    GUI/Gizmos/PaintBrushLibrary.hpp
     GUI/CSGPreviewManager.cpp
     GUI/CSGPreviewManager.hpp
     GUI/LibVGCode/LibVGCodeWrapper.hpp

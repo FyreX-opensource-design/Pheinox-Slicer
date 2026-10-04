@@ -969,23 +969,38 @@ private:
 //   rgb           : 24-bit target color for the region.
 //   extruder_lock : -1 = color-match (resolved via find_best_match against current filaments).
 //                   >= 0 = pin to this physical extruder slot regardless of rgb.
+//   coex_count    : 0 = ordinary layer blend. 2 or 3 = coextruded walls. Those tools still
+//                   take turns by layer, but each tool's walls in the painted area are shifted
+//                   like a deliberate tool offset. coex_extruders[0] and [1] sit on opposite
+//                   ends of a line; rotation spins that line. For three tools, [2] is shifted
+//                   off the midpoint of the first two.
 struct ColorMixingRecipe
 {
     uint32_t rgb = 0;          // 0x00RRGGBB
     int8_t extruder_lock = -1; // -1 = color-match; >= 0 = force this extruder
+    uint8_t coex_count = 0;
+    int8_t coex_extruders[3] = {-1, -1, -1};
+    float coex_rotation_deg = 0.f;
 
     ColorMixingRecipe() = default;
     ColorMixingRecipe(uint32_t rgb_, int8_t lock_) : rgb(rgb_), extruder_lock(lock_) {}
 
     bool is_locked() const { return extruder_lock >= 0; }
+    bool is_coextruded() const { return coex_count == 2 || coex_count == 3; }
 
-    bool operator==(const ColorMixingRecipe &o) const { return rgb == o.rgb && extruder_lock == o.extruder_lock; }
+    bool operator==(const ColorMixingRecipe &o) const
+    {
+        return rgb == o.rgb && extruder_lock == o.extruder_lock && coex_count == o.coex_count &&
+               coex_extruders[0] == o.coex_extruders[0] && coex_extruders[1] == o.coex_extruders[1] &&
+               coex_extruders[2] == o.coex_extruders[2] && coex_rotation_deg == o.coex_rotation_deg;
+    }
     bool operator!=(const ColorMixingRecipe &o) const { return !(*this == o); }
 
     template<class Archive>
     void serialize(Archive &ar)
     {
-        ar(rgb, extruder_lock);
+        ar(rgb, extruder_lock, coex_count, coex_extruders[0], coex_extruders[1], coex_extruders[2],
+           coex_rotation_deg);
     }
 };
 

@@ -54,6 +54,12 @@ struct MouseInput
     // Whether this is a dragging motion (button held + moved)
     bool dragging{false};
 
+    // Stylus (pen) rather than a mouse. Pressure is 0..1 when the device reported
+    // it, and negative when this event has no pressure sample.
+    bool stylus{false};
+    bool eraser{false};
+    float pressure{-1.f};
+
     // Set by handler to indicate the event should propagate (replaces evt.Skip())
     mutable bool propagate{false};
 

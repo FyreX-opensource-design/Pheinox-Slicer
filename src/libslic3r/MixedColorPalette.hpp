@@ -14,6 +14,8 @@
 namespace Slic3r
 {
 
+struct ColorMixingRecipe;
+
 struct MixedColor
 {
     int id = 0;               // Stable palette ID (1-based, never reused)
@@ -23,12 +25,17 @@ struct MixedColor
     float delta_e = 0.0f;     // Quality metric (computed, not serialized)
 
     // Repeating layer pattern: physical filament indices (0-based)
-    // e.g., {0, 0, 2} = filament 0, filament 0, filament 2, repeat
+    // e.g., {0, 0, 2} = filament 0, filament 0, filament 2, repeat.
+    // Coextruded entries store one slot per tool, in the order used for the wall shift.
     std::vector<int> layer_pattern;
 
     bool enabled = true;
     bool user_override = false; // User manually set the pattern
     bool auto_generated = false;
+    // Walls of these tools are shifted apart on purpose, the way a wrong tool offset
+    // makes a layer blend look coextruded. Rotation spins which color faces which way.
+    bool coextruded = false;
+    float coex_rotation_deg = 0.f;
 };
 
 class MixedColorPalette
@@ -52,6 +59,13 @@ public:
 
     // Clear all colors and reset ID counter
     void clear();
+
+    // Rotation for one coextruded swatch, in degrees. Ignored for ordinary blends.
+    void set_coex_rotation(size_t index, float degrees);
+
+    // After the palette is rebuilt, put back rotations stored on painted recipes.
+    // Match is by the ordered tool list, so a filament reload does not snap them to 0.
+    void apply_saved_coex_rotations(const std::vector<ColorMixingRecipe> &recipes);
 
     // Recompute predicted colors and patterns for all entries.
     // Call when filament colors, TD, or layer height change.

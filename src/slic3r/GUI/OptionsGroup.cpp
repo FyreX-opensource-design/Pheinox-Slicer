@@ -29,6 +29,7 @@
 #include "Widgets/CheckBox.hpp"
 #include "format.hpp"
 
+#include <algorithm>
 #include <utility>
 #include <wx/bookctrl.h> // IWYU pragma: keep
 #include <wx/dcclient.h>
@@ -113,8 +114,16 @@ const t_field &OptionsGroup::build_field(const t_config_option_key &id, const Co
         case coEnums:
             m_fields.emplace(id, Choice::Create<Choice>(this->ctrl_parent(), opt, id));
             break;
-        case coPoints:
+        case coPoint:
             m_fields.emplace(id, PointCtrl::Create<PointCtrl>(this->ctrl_parent(), opt, id));
+            break;
+        case coPoints:
+            // A waypoint list (empty by default) is edited as text, not a single XY pair.
+            // PointCtrl reads values.front() and throws when that list is empty.
+            if (opt.opt_key == "feature_purge_approach")
+                m_fields.emplace(id, TextCtrl::Create<TextCtrl>(this->ctrl_parent(), opt, id));
+            else
+                m_fields.emplace(id, PointCtrl::Create<PointCtrl>(this->ctrl_parent(), opt, id));
             break;
         case coNone:
             break;
@@ -316,8 +325,24 @@ void OptionsGroup::change_opt_value(DynamicPrintConfig &config, const t_config_o
             config.option<ConfigOptionEnumsGeneric>(opt_key)->set_at(vec_new, opt_index, 0);
             break;
         }
+        case coPoint:
+            config.set_key_value(opt_key, new ConfigOptionPoint(boost::any_cast<Vec2d>(value)));
+            break;
         case coPoints:
         {
+            if (opt_key == "feature_purge_approach")
+            {
+                std::string str;
+                if (const std::string *s = boost::any_cast<std::string>(&value))
+                    str = *s;
+                else if (const wxString *ws = boost::any_cast<wxString>(&value))
+                    str = into_u8(*ws);
+                std::replace(str.begin(), str.end(), 'X', 'x');
+                auto *points = new ConfigOptionPoints();
+                points->deserialize(str);
+                config.set_key_value(opt_key, points);
+                break;
+            }
             if (opt_key == "bed_shape")
             {
                 config.option<ConfigOptionPoints>(opt_key)->values = boost::any_cast<std::vector<Vec2d>>(value);
@@ -1383,11 +1408,19 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig &config
     case coEnums:
         ret = config.option(opt_key)->getInts()[idx];
         break;
+    case coPoint:
+        ret = config.option<ConfigOptionPoint>(opt_key)->value;
+        break;
     case coPoints:
         if (opt_key == "bed_shape")
             ret = config.option<ConfigOptionPoints>(opt_key)->values;
+        else if (opt_key == "feature_purge_approach")
+            ret = from_u8(config.option<ConfigOptionPoints>(opt_key)->serialize());
         else
-            ret = config.option<ConfigOptionPoints>(opt_key)->get_at(idx);
+        {
+            const auto *pts = config.option<ConfigOptionPoints>(opt_key);
+            ret = (pts && !pts->values.empty()) ? pts->get_at(idx) : Vec2d::Zero();
+        }
         break;
     case coNone:
     default:

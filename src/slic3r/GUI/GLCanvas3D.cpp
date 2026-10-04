@@ -81,6 +81,14 @@
 #include <wx/debug.h>
 #include <wx/fontutil.h>
 
+#ifdef __WXMSW__
+#include <wx/msw/private.h>
+#include <commctrl.h>
+#endif
+#ifdef __WXGTK3__
+#include <gtk/gtk.h>
+#endif
+
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 #include "libslic3r/Print.hpp"
 #include "wxExtensions.hpp"
@@ -1296,12 +1304,15 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas *canvas, Bed3D &bed, AppConfig *app_config, Im
 
 GLCanvas3D::~GLCanvas3D()
 {
+    remove_canvas_touch();
     if (s_vbt_owner == this)
     {
         s_virtual_bed_timer->stop();
         s_virtual_bed_timer.reset();
         s_vbt_owner = nullptr;
     }
+    // Plater destroys NotificationManager before wx destroys this canvas, so the pointer is dangling here.
+    m_notification_manager = nullptr;
     reset_volumes();
 }
 
@@ -3067,6 +3078,602 @@ void GLCanvas3D::load_preview(const std::vector<std::string> &str_tool_colors,
     _set_warning_notification_if_needed(EWarning::ToolpathOutside);
 }
 
+namespace
+{
+struct TouchSample
+{
+    Vec2d centroid{Vec2d::Zero()};
+    double distance{0.0};
+    double angle{0.0};
+};
+
+TouchSample sample_touches(const std::map<std::intptr_t, Vec2d> &points)
+{
+    TouchSample sample;
+    if (points.empty())
+        return sample;
+
+    for (const auto &entry : points)
+        sample.centroid += entry.second;
+    sample.centroid /= static_cast<double>(points.size());
+
+    if (points.size() >= 2)
+    {
+        auto it = points.begin();
+        const Vec2d a = it->second;
+        ++it;
+        const Vec2d delta = it->second - a;
+        sample.distance = delta.norm();
+        sample.angle = std::atan2(delta.y(), delta.x());
+    }
+    return sample;
+}
+
+double wrap_touch_angle(double delta)
+{
+    while (delta > PI)
+        delta -= 2.0 * PI;
+    while (delta < -PI)
+        delta += 2.0 * PI;
+    return delta;
+}
+} // namespace
+
+#ifdef __WXMSW__
+static const UINT_PTR CANVAS_TOUCH_SUBCLASS_ID = 0x50483144;
+
+static LRESULT CALLBACK canvas_touch_subclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR subclass_id,
+                                               DWORD_PTR ref_data)
+{
+    auto *canvas = reinterpret_cast<GLCanvas3D *>(ref_data);
+    if (msg == WM_TOUCH && canvas != nullptr)
+    {
+        const UINT count = LOWORD(wParam);
+        HTOUCHINPUT handle = reinterpret_cast<HTOUCHINPUT>(lParam);
+        std::vector<TOUCHINPUT> inputs(count);
+        if (count > 0 && ::GetTouchInputInfo(handle, count, inputs.data(), sizeof(TOUCHINPUT)))
+        {
+            for (const TOUCHINPUT &contact : inputs)
+            {
+                POINT pt;
+                pt.x = contact.x / 100;
+                pt.y = contact.y / 100;
+                ::ScreenToClient(hwnd, &pt);
+                const bool ended = (contact.dwFlags & TOUCHEVENTF_UP) != 0;
+                canvas->handle_touch_contact(static_cast<std::intptr_t>(contact.dwID), pt.x, pt.y, ended);
+            }
+            ::CloseTouchInputHandle(handle);
+            return 0;
+        }
+    }
+    if (msg == WM_NCDESTROY)
+        ::RemoveWindowSubclass(hwnd, canvas_touch_subclass, subclass_id);
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+#endif // __WXMSW__
+
+#ifdef __WXGTK3__
+static bool gdk_event_from_stylus(const GdkEvent *event)
+{
+    if (event == nullptr)
+        return false;
+    GdkDevice *device = gdk_event_get_source_device(event);
+    if (device == nullptr)
+        device = gdk_event_get_device(event);
+    if (device == nullptr)
+        return false;
+    const GdkInputSource source = gdk_device_get_source(device);
+    return source == GDK_SOURCE_PEN || source == GDK_SOURCE_ERASER || source == GDK_SOURCE_CURSOR;
+}
+
+static gboolean canvas_gtk_touch_cb(GtkWidget *, GdkEvent *event, GLCanvas3D *canvas)
+{
+    if (canvas == nullptr || event == nullptr)
+        return FALSE;
+    const GdkEventType type = event->type;
+    if (type != GDK_TOUCH_BEGIN && type != GDK_TOUCH_UPDATE && type != GDK_TOUCH_END && type != GDK_TOUCH_CANCEL)
+        return FALSE;
+
+    // A pen is a pointer with pressure, not another finger. Leave it for the mouse path.
+    if (gdk_event_from_stylus(event))
+        return FALSE;
+
+    const auto *touch = reinterpret_cast<const GdkEventTouch *>(event);
+    if (touch->sequence == nullptr)
+        return TRUE;
+
+    const bool ended = type == GDK_TOUCH_END || type == GDK_TOUCH_CANCEL;
+    canvas->handle_touch_contact(reinterpret_cast<std::intptr_t>(touch->sequence), touch->x, touch->y, ended);
+    // Consume the touch so it is not also delivered as a click on a toolbar button.
+    // Any pointer GTK still emulates is ignored while a contact is down.
+    return TRUE;
+}
+
+static gboolean canvas_gtk_proximity_cb(GtkWidget *, GdkEvent *event, GLCanvas3D *canvas)
+{
+    if (canvas == nullptr || event == nullptr)
+        return FALSE;
+    if (event->type == GDK_PROXIMITY_IN)
+        canvas->set_stylus_proximity(true);
+    else if (event->type == GDK_PROXIMITY_OUT)
+        canvas->set_stylus_proximity(false);
+    return FALSE;
+}
+#endif // __WXGTK3__
+
+Vec2d GLCanvas3D::widget_touch_to_canvas(double x, double y) const
+{
+    double scale = 1.0;
+#if ENABLE_RETINA_GL
+    if (m_retina_helper)
+        scale = static_cast<double>(m_retina_helper->get_scale_factor());
+#endif
+    return Vec2d(x * scale, y * scale);
+}
+
+void GLCanvas3D::install_canvas_touch()
+{
+#ifdef __WXGTK3__
+    if (m_canvas != nullptr && m_canvas->m_wxwindow != nullptr && m_touch.gtk_handler == 0)
+    {
+        GtkWidget *widget = m_canvas->m_wxwindow;
+        const GdkEventMask stylus_mask = static_cast<GdkEventMask>(GDK_TOUCH_MASK | GDK_PROXIMITY_IN_MASK |
+                                                                    GDK_PROXIMITY_OUT_MASK);
+        gtk_widget_add_events(widget, stylus_mask);
+        if (GdkWindow *window = gtk_widget_get_window(widget))
+        {
+            const gint mask = gdk_window_get_events(window);
+            gdk_window_set_events(window, static_cast<GdkEventMask>(mask | stylus_mask));
+        }
+        m_touch.gtk_widget = widget;
+        m_touch.swallow_emulated_mouse = true;
+        m_touch.gtk_handler = g_signal_connect(widget, "touch-event", G_CALLBACK(canvas_gtk_touch_cb), this);
+        m_touch.gtk_proximity_in =
+            g_signal_connect(widget, "proximity-in-event", G_CALLBACK(canvas_gtk_proximity_cb), this);
+        m_touch.gtk_proximity_out =
+            g_signal_connect(widget, "proximity-out-event", G_CALLBACK(canvas_gtk_proximity_cb), this);
+    }
+#endif
+#ifdef __WXMSW__
+    if (!m_touch.win_hooked && m_canvas != nullptr)
+    {
+        HWND hwnd = reinterpret_cast<HWND>(m_canvas->GetHandle());
+        if (hwnd != nullptr && ::SetWindowSubclass(hwnd, canvas_touch_subclass, CANVAS_TOUCH_SUBCLASS_ID,
+                                                    reinterpret_cast<DWORD_PTR>(this)) &&
+            ::RegisterTouchWindow(hwnd, 0))
+        {
+            m_touch.win_hooked = true;
+            m_touch.swallow_emulated_mouse = false;
+        }
+        else if (hwnd != nullptr)
+            ::RemoveWindowSubclass(hwnd, canvas_touch_subclass, CANVAS_TOUCH_SUBCLASS_ID);
+    }
+#endif
+}
+
+void GLCanvas3D::remove_canvas_touch()
+{
+    if (m_initialized && m_event_poster != nullptr && m_touch.one_finger_down_sent)
+    {
+        if (m_moving && m_mouse.drag.move_volume_idx != -1 && !m_gizmos.is_dragging())
+            cancel_touch_object_drag();
+        else
+            synthesize_touch_pointer(MouseEventType::LeftUp, m_touch.one_pos, false, false);
+    }
+
+    m_touch.points.clear();
+    m_touch.one_finger = false;
+    m_touch.one_finger_down_sent = false;
+    m_touch.camera = false;
+    m_touch.camera_fingers = 0;
+    m_touch.pan_valid = false;
+    m_touch.owns_pointer = false;
+
+#ifdef __WXGTK3__
+    if (m_touch.gtk_handler != 0 && m_touch.gtk_widget != nullptr)
+    {
+        GtkWidget *widget = static_cast<GtkWidget *>(m_touch.gtk_widget);
+        if (m_touch.gtk_handler != 0)
+            g_signal_handler_disconnect(widget, m_touch.gtk_handler);
+        if (m_touch.gtk_proximity_in != 0)
+            g_signal_handler_disconnect(widget, m_touch.gtk_proximity_in);
+        if (m_touch.gtk_proximity_out != 0)
+            g_signal_handler_disconnect(widget, m_touch.gtk_proximity_out);
+        m_touch.gtk_handler = 0;
+        m_touch.gtk_proximity_in = 0;
+        m_touch.gtk_proximity_out = 0;
+        m_touch.gtk_widget = nullptr;
+    }
+#endif
+#ifdef __WXMSW__
+    if (m_touch.win_hooked && m_canvas != nullptr)
+    {
+        HWND hwnd = reinterpret_cast<HWND>(m_canvas->GetHandle());
+        if (hwnd != nullptr)
+        {
+            ::UnregisterTouchWindow(hwnd);
+            ::RemoveWindowSubclass(hwnd, canvas_touch_subclass, CANVAS_TOUCH_SUBCLASS_ID);
+        }
+        m_touch.win_hooked = false;
+    }
+#endif
+}
+
+void GLCanvas3D::set_stylus_proximity(bool in_range)
+{
+    m_touch.stylus_in_proximity = in_range;
+    if (!in_range)
+        m_touch.stylus_pressure = -1.f;
+}
+
+void GLCanvas3D::apply_stylus_sample(MouseInput &mouse)
+{
+    mouse.stylus = false;
+    mouse.eraser = false;
+    mouse.pressure = -1.f;
+
+#ifdef __WXGTK3__
+    bool plain_mouse = false;
+    if (GdkEvent *current = gtk_get_current_event())
+    {
+        GdkDevice *device = gdk_event_get_source_device(current);
+        if (device == nullptr)
+            device = gdk_event_get_device(current);
+        if (device != nullptr)
+        {
+            const GdkInputSource source = gdk_device_get_source(device);
+            if (source == GDK_SOURCE_PEN || source == GDK_SOURCE_ERASER || source == GDK_SOURCE_CURSOR)
+                mouse.stylus = true;
+            if (source == GDK_SOURCE_ERASER)
+                mouse.eraser = true;
+            if (source == GDK_SOURCE_MOUSE || source == GDK_SOURCE_TOUCHPAD || source == GDK_SOURCE_TRACKPOINT ||
+                source == GDK_SOURCE_TOUCHSCREEN)
+                plain_mouse = true;
+        }
+
+        gdouble axis = 0.0;
+        if (gdk_event_get_axis(current, GDK_AXIS_PRESSURE, &axis) == TRUE)
+        {
+            mouse.stylus = true;
+            plain_mouse = false;
+            // GDK usually normalizes pressure to 0..1. Some devices still report the raw range.
+            if (axis > 1.0)
+                axis /= 65535.0;
+            if (axis < 0.0)
+                axis = 0.0;
+            else if (axis > 1.0)
+                axis = 1.0;
+            mouse.pressure = static_cast<float>(axis);
+        }
+        gdk_event_free(current);
+    }
+    // Proximity covers pens whose pointer events are not tagged with a pen device.
+    // A real mouse event keeps orbiting even while the pen is nearby.
+    if (m_touch.stylus_in_proximity && !plain_mouse)
+        mouse.stylus = true;
+#endif
+
+#ifdef __WXMSW__
+    // Promoted pen mouse messages carry this signature in GetMessageExtraInfo.
+    const LPARAM extra = ::GetMessageExtraInfo();
+    if ((extra & 0xFFFFFF80) == 0xFF515700)
+    {
+        mouse.stylus = true;
+        POINTER_PEN_INFO pen_info{};
+        if (::GetPointerPenInfo(static_cast<UINT32>(extra & 0x7F), &pen_info))
+        {
+            float axis = static_cast<float>(pen_info.pressure) / 1024.f;
+            if (axis < 0.f)
+                axis = 0.f;
+            else if (axis > 1.f)
+                axis = 1.f;
+            mouse.pressure = axis;
+            if ((pen_info.penFlags & (PEN_FLAG_ERASER | PEN_FLAG_INVERTED)) != 0)
+                mouse.eraser = true;
+        }
+    }
+#endif
+
+    if (mouse.eraser)
+    {
+        if (mouse.type == MouseEventType::LeftDown)
+            mouse.type = MouseEventType::RightDown;
+        else if (mouse.type == MouseEventType::LeftUp)
+            mouse.type = MouseEventType::RightUp;
+        else if (mouse.type == MouseEventType::LeftDClick)
+            mouse.type = MouseEventType::RightDClick;
+        if (mouse.left_down)
+        {
+            mouse.left_down = false;
+            mouse.right_down = true;
+        }
+    }
+
+    if (mouse.pressure >= 0.f)
+        m_touch.stylus_pressure = mouse.pressure;
+    else if (mouse.stylus && (mouse.left_down || mouse.right_down) && m_touch.stylus_pressure >= 0.f)
+        mouse.pressure = m_touch.stylus_pressure;
+
+    if (!mouse.stylus)
+        m_touch.stylus_pressure = -1.f;
+}
+
+void GLCanvas3D::handle_touch_contact(std::intptr_t id, double x, double y, bool ended)
+{
+    if (!m_initialized)
+        return;
+    if (!ended && (!std::isfinite(x) || !std::isfinite(y)))
+        return;
+
+    m_touch.owns_pointer = true;
+    if (ended)
+        m_touch.points.erase(id);
+    else
+        m_touch.points[id] = widget_touch_to_canvas(x, y);
+
+    if (m_touch.points.empty())
+        m_touch.released_ms = wxGetLocalTimeMillis().GetValue();
+
+    update_touch_navigation();
+    if (m_dirty)
+        wxWakeUpIdle();
+}
+
+void GLCanvas3D::sync_touch_camera_baseline()
+{
+    const TouchSample sample = sample_touches(m_touch.points);
+    m_touch.last_centroid = sample.centroid;
+    m_touch.last_dist = sample.distance;
+    m_touch.last_angle = sample.angle;
+    m_touch.camera_fingers = static_cast<int>(m_touch.points.size());
+    m_touch.pan_valid = false;
+    if (m_touch.camera_fingers >= 3)
+    {
+        m_touch.pan_origin = sample.centroid;
+        m_touch.pan_target = get_camera().get_target();
+        m_touch.pan_valid = true;
+    }
+}
+
+void GLCanvas3D::synthesize_touch_pointer(MouseEventType type, const Vec2d &pos, bool left_down, bool dragging)
+{
+    MouseInput mouse;
+    mouse.type = type;
+    mouse.x = pos.x();
+    mouse.y = pos.y();
+    mouse.left_down = left_down;
+    mouse.dragging = dragging;
+    on_mouse_internal(mouse);
+}
+
+void GLCanvas3D::begin_one_finger_touch(std::intptr_t id, const Vec2d &pos)
+{
+    m_touch.one_finger = true;
+    m_touch.one_finger_down_sent = false;
+    m_touch.one_id = id;
+    m_touch.one_origin = pos;
+    m_touch.one_pos = pos;
+    m_mouse.position = pos;
+    synthesize_touch_pointer(MouseEventType::Motion, pos, false, false);
+}
+
+void GLCanvas3D::begin_one_finger_drag(const Vec2d &current)
+{
+    const Vec2d origin = m_touch.one_origin;
+    m_mouse.position = origin;
+    m_mouse.scene_position = _mouse_to_3d({origin.x(), origin.y()});
+    _picking_pass();
+    synthesize_touch_pointer(MouseEventType::LeftDown, origin, true, false);
+    m_touch.one_finger_down_sent = true;
+    m_touch.one_pos = current;
+    synthesize_touch_pointer(MouseEventType::Motion, current, true, true);
+}
+
+void GLCanvas3D::finish_one_finger_touch()
+{
+    const Vec2d pos = m_touch.one_pos;
+    if (!m_touch.one_finger_down_sent)
+    {
+        m_mouse.position = pos;
+        m_mouse.scene_position = _mouse_to_3d({pos.x(), pos.y()});
+        _picking_pass();
+        synthesize_touch_pointer(MouseEventType::LeftDown, pos, true, false);
+    }
+    synthesize_touch_pointer(MouseEventType::LeftUp, pos, false, false);
+    m_touch.one_finger = false;
+    m_touch.one_finger_down_sent = false;
+}
+
+void GLCanvas3D::cancel_touch_object_drag()
+{
+    TransformationType trafo_type;
+    trafo_type.set_relative();
+    m_selection.translate(Vec3d::Zero(), trafo_type);
+    if (s_virtual_bed_timer)
+        s_virtual_bed_timer->stop();
+    s_multiple_beds.request_next_bed(false);
+    mouse_up_cleanup();
+    m_dirty = true;
+}
+
+void GLCanvas3D::promote_touch_to_camera()
+{
+    if (m_touch.one_finger_down_sent)
+    {
+        if (m_moving && m_mouse.drag.move_volume_idx != -1 && !m_gizmos.is_dragging())
+            cancel_touch_object_drag();
+        else
+            synthesize_touch_pointer(MouseEventType::LeftUp, m_touch.one_pos, false, false);
+    }
+    m_touch.one_finger = false;
+    m_touch.one_finger_down_sent = false;
+    m_touch.camera = true;
+    sync_touch_camera_baseline();
+}
+
+void GLCanvas3D::touch_orbit(double dx, double dy)
+{
+    const Vec3d rot = Vec3d(dx, dy, 0.0) * (PI * TRACKBALLSIZE / 180.0);
+    Camera &camera = get_camera();
+    if (m_app_config->get_bool("use_free_camera"))
+        camera.rotate_local_around_target(Vec3d(rot.y(), rot.x(), 0.0));
+    else
+    {
+        camera.recover_from_free_camera();
+        camera.rotate_on_sphere(rot.x(), rot.y(), true);
+    }
+    m_dirty = true;
+}
+
+void GLCanvas3D::touch_twist(double delta_rad)
+{
+    if (std::abs(delta_rad) < 0.01)
+        return;
+
+    Camera &camera = get_camera();
+    if (m_app_config->get_bool("use_free_camera"))
+        camera.rotate_local_around_target(Vec3d(0.0, 0.0, -delta_rad));
+    else
+    {
+        camera.recover_from_free_camera();
+        camera.rotate_on_sphere(-delta_rad, 0.0, true);
+    }
+    m_dirty = true;
+}
+
+void GLCanvas3D::touch_pinch(const Vec2d &focus, double scale)
+{
+    if (!(scale > 0.0) || std::abs(scale - 1.0) < 1e-4)
+        return;
+
+    Camera &camera = get_camera();
+    const Size cnv_size = get_canvas_size();
+    const Vec3d screen_center = _mouse_to_3d({cnv_size.get_width() * 0.5, cnv_size.get_height() * 0.5});
+    const Vec3d focus_3d = _mouse_to_3d({focus.x(), focus.y()});
+    const bool anchor = screen_center.x() < 1e10 && focus_3d.x() < 1e10;
+    Vec3d displacement = Vec3d::Zero();
+    if (anchor)
+    {
+        displacement = focus_3d - screen_center;
+        camera.translate_world(displacement);
+    }
+
+    const double origin_zoom = camera.get_zoom();
+    camera.set_zoom(origin_zoom * scale);
+    if (anchor && origin_zoom > 0.0)
+        camera.translate_world((-displacement) / (camera.get_zoom() / origin_zoom));
+    m_dirty = true;
+}
+
+void GLCanvas3D::touch_pan(const Vec2d &current)
+{
+    if (!m_touch.pan_valid)
+        return;
+
+    Camera &camera = get_camera();
+    const float z = 0.0f;
+    const Vec3d cur_pos = _mouse_to_3d({current.x(), current.y()}, &z, true);
+    const Vec3d orig = _mouse_to_3d({m_touch.pan_origin.x(), m_touch.pan_origin.y()}, &z, true);
+    if (!m_app_config->get_bool("use_free_camera"))
+        camera.recover_from_free_camera();
+    camera.set_target(m_touch.pan_target + orig - cur_pos);
+    m_dirty = true;
+}
+
+void GLCanvas3D::apply_touch_camera()
+{
+    const int n = static_cast<int>(m_touch.points.size());
+    if (n < 2)
+        return;
+    if (n != m_touch.camera_fingers)
+    {
+        sync_touch_camera_baseline();
+        return;
+    }
+
+    const TouchSample sample = sample_touches(m_touch.points);
+    if (n >= 3)
+    {
+        touch_pan(sample.centroid);
+        return;
+    }
+
+    if (m_touch.last_dist > 1.0 && sample.distance > 1.0)
+    {
+        const double scale = sample.distance / m_touch.last_dist;
+        if (scale <= 0.5 || scale >= 2.0)
+        {
+            sync_touch_camera_baseline();
+            return;
+        }
+        touch_pinch(sample.centroid, scale);
+    }
+
+    const Vec2d delta = sample.centroid - m_touch.last_centroid;
+    if (std::abs(delta.x()) > 0.01 || std::abs(delta.y()) > 0.01)
+        touch_orbit(delta.x(), delta.y());
+    touch_twist(wrap_touch_angle(sample.angle - m_touch.last_angle));
+
+    m_touch.last_centroid = sample.centroid;
+    m_touch.last_dist = sample.distance;
+    m_touch.last_angle = sample.angle;
+}
+
+void GLCanvas3D::update_touch_navigation()
+{
+    const int n = static_cast<int>(m_touch.points.size());
+    if (n == 0)
+    {
+        if (m_touch.one_finger)
+            finish_one_finger_touch();
+        m_touch.camera = false;
+        m_touch.camera_fingers = 0;
+        m_touch.pan_valid = false;
+        if (!m_touch.swallow_emulated_mouse)
+            m_touch.owns_pointer = false;
+        return;
+    }
+
+    if (m_touch.camera)
+    {
+        if (n == 1)
+        {
+            m_touch.camera_fingers = 1;
+            m_touch.pan_valid = false;
+            return;
+        }
+        apply_touch_camera();
+        return;
+    }
+
+    if (n == 1)
+    {
+        const std::intptr_t id = m_touch.points.begin()->first;
+        const Vec2d pos = m_touch.points.begin()->second;
+        if (!m_touch.one_finger)
+        {
+            begin_one_finger_touch(id, pos);
+            return;
+        }
+
+        m_touch.one_pos = pos;
+        if (!m_touch.one_finger_down_sent)
+        {
+            const bool moved = std::abs(pos.x() - m_touch.one_origin.x()) > Mouse::Drag::MoveThresholdPx ||
+                               std::abs(pos.y() - m_touch.one_origin.y()) > Mouse::Drag::MoveThresholdPx;
+            if (moved)
+                begin_one_finger_drag(pos);
+            else
+                synthesize_touch_pointer(MouseEventType::Motion, pos, false, false);
+        }
+        else
+            synthesize_touch_pointer(MouseEventType::Motion, pos, true, true);
+        return;
+    }
+
+    promote_touch_to_camera();
+}
+
 void GLCanvas3D::bind_event_handlers()
 {
     if (m_canvas != nullptr)
@@ -3102,6 +3709,7 @@ void GLCanvas3D::bind_event_handlers()
         m_canvas->Bind(wxEVT_RIGHT_DCLICK, &GLCanvas3D::on_mouse, this);
         m_canvas->Bind(wxEVT_PAINT, &GLCanvas3D::on_paint, this);
         m_canvas->Bind(wxEVT_SET_FOCUS, &GLCanvas3D::on_set_focus, this);
+        install_canvas_touch();
 
         m_event_handlers_bound = true;
     }
@@ -3131,6 +3739,7 @@ void GLCanvas3D::unbind_event_handlers()
         m_canvas->Unbind(wxEVT_RIGHT_DCLICK, &GLCanvas3D::on_mouse, this);
         m_canvas->Unbind(wxEVT_PAINT, &GLCanvas3D::on_paint, this);
         m_canvas->Unbind(wxEVT_SET_FOCUS, &GLCanvas3D::on_set_focus, this);
+        remove_canvas_touch();
 
         m_event_handlers_bound = false;
     }
@@ -4000,12 +4609,43 @@ void GLCanvas3D::schedule_extra_frame(int miliseconds)
 void GLCanvas3D::on_mouse(wxMouseEvent &evt)
 {
     assert(m_event_poster);
+#ifdef __WXGTK3__
+    // GTK turns the first touch contact into a mouse pointer. The touch handler
+    // owns selection and drags; this copy would also click and orbit.
+    if (m_touch.gtk_handler != 0)
+    {
+        if (GdkEvent *current = gtk_get_current_event())
+        {
+            const bool emulated = gdk_event_get_pointer_emulated(current) == TRUE;
+            gdk_event_free(current);
+            if (emulated)
+                return;
+        }
+    }
+#endif
+    // The first touch contact is also delivered as a mouse pointer. Multi-touch
+    // navigation owns those events so a pinch does not drag the part under one finger.
+    if (m_touch.owns_pointer)
+    {
+        if (!m_touch.points.empty())
+            return;
+
+        const long long age = wxGetLocalTimeMillis().GetValue() - m_touch.released_ms;
+        if (m_touch.swallow_emulated_mouse && age < 100 && !evt.LeftDown() && !evt.RightDown() && !evt.MiddleDown())
+        {
+            if (evt.LeftUp() || evt.RightUp() || evt.MiddleUp())
+                m_touch.owns_pointer = false;
+            return;
+        }
+        m_touch.owns_pointer = false;
+    }
 #if ENABLE_RETINA_GL
     const float scale = m_retina_helper->get_scale_factor();
     evt.SetX(evt.GetX() * scale);
     evt.SetY(evt.GetY() * scale);
 #endif
     MouseInput mouse = mouse_from_wx(evt);
+    apply_stylus_sample(mouse);
     on_mouse_internal(mouse);
     if (mouse.propagate)
         evt.Skip();
@@ -4399,8 +5039,9 @@ void GLCanvas3D::on_mouse_internal(MouseInput &mouse)
         // do not process the dragging if the left mouse was set down in another canvas
         else if (mouse.left_down)
         {
-            // if dragging over blank area with left button, rotate
-            if (!m_moving)
+            // A touch contact or a stylus tip selects and moves objects. Orbit stays on
+            // the mouse, or on two fingers once the touch handler is driving the camera.
+            if (!m_moving && m_touch.points.empty() && !mouse.stylus)
             {
                 if ((any_gizmo_active || mouse.cmd || m_hover_volume_idxs.empty()) &&
                     m_mouse.is_start_position_3D_defined())
@@ -7968,6 +8609,9 @@ void GLCanvas3D::_set_warning_notification_if_needed(EWarning warning)
 
 void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
 {
+    if (m_notification_manager == nullptr)
+        return;
+
     enum ErrorType
     {
         PLATER_WARNING,

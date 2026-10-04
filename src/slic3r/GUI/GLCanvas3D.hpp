@@ -36,6 +36,7 @@
 
 #include <float.h>
 #include <functional>
+#include <map>
 
 class wxSizeEvent;
 class wxIdleEvent;
@@ -583,6 +584,46 @@ private:
     std::unique_ptr<ITimer> m_timer;
     LayersEditing m_layers_editing;
     Mouse m_mouse;
+
+    // Touchscreen contacts on the plate view. One contact selects and moves objects,
+    // two contacts pinch-zoom and otherwise orbit, three or more pan.
+    struct TouchState
+    {
+        std::map<std::intptr_t, Vec2d> points;
+        // Emulated pointer events that follow a touch are ignored while this is set.
+        bool owns_pointer{false};
+        // GTK still synthesizes a mouse pointer from the first contact. Windows touch
+        // registration does not, so the trailing-event swallow is GTK-only.
+        bool swallow_emulated_mouse{true};
+        long long released_ms{0};
+
+        bool one_finger{false};
+        bool one_finger_down_sent{false};
+        std::intptr_t one_id{0};
+        Vec2d one_origin{Vec2d::Zero()};
+        Vec2d one_pos{Vec2d::Zero()};
+
+        bool camera{false};
+        int camera_fingers{0};
+        Vec2d last_centroid{Vec2d::Zero()};
+        double last_dist{0.0};
+        double last_angle{0.0};
+        bool pan_valid{false};
+        Vec2d pan_origin{Vec2d::Zero()};
+        Vec3d pan_target{Vec3d::Zero()};
+
+        void *gtk_widget{nullptr};
+        unsigned long gtk_handler{0};
+        unsigned long gtk_proximity_in{0};
+        unsigned long gtk_proximity_out{0};
+        bool win_hooked{false};
+
+        // Pen is in range. Tip drags select and move, the same as one finger.
+        bool stylus_in_proximity{false};
+        // Last pressure sample in 0..1. Negative means the pen has not reported one.
+        float stylus_pressure{-1.f};
+    };
+    TouchState m_touch;
     GLGizmosManager m_gizmos;
     GLToolbar m_main_toolbar;
     GLToolbar m_undoredo_toolbar;
@@ -1332,6 +1373,9 @@ public:
     void on_timer_internal();
     void on_render_timer_internal();
     void on_mouse(wxMouseEvent &evt);
+    // Widget-pixel touch contact from the platform hook. `ended` lifts that contact.
+    void handle_touch_contact(std::intptr_t id, double x, double y, bool ended);
+    void set_stylus_proximity(bool in_range);
     void on_paint(wxPaintEvent &evt);
     void on_set_focus(wxFocusEvent &evt);
 
@@ -1498,6 +1542,24 @@ private:
 
     void _zoom_to_box(const BoundingBoxf3 &box, double margin_factor = DefaultCameraZoomToBoxMarginFactor);
     void _update_camera_zoom(double zoom);
+
+    void install_canvas_touch();
+    void remove_canvas_touch();
+    void apply_stylus_sample(MouseInput &mouse);
+    Vec2d widget_touch_to_canvas(double x, double y) const;
+    void update_touch_navigation();
+    void sync_touch_camera_baseline();
+    void begin_one_finger_touch(std::intptr_t id, const Vec2d &pos);
+    void begin_one_finger_drag(const Vec2d &current);
+    void finish_one_finger_touch();
+    void cancel_touch_object_drag();
+    void promote_touch_to_camera();
+    void apply_touch_camera();
+    void synthesize_touch_pointer(MouseEventType type, const Vec2d &pos, bool left_down, bool dragging);
+    void touch_orbit(double dx, double dy);
+    void touch_twist(double delta_rad);
+    void touch_pinch(const Vec2d &focus, double scale);
+    void touch_pan(const Vec2d &current);
 
     void _refresh_if_shown_on_screen();
 

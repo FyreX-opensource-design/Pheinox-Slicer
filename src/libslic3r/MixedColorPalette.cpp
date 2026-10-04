@@ -5,6 +5,7 @@
 #include "MixedColorPalette.hpp"
 #include "ColorMixer.hpp"
 #include "ColorDithering.hpp"
+#include "Model.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -103,6 +104,41 @@ static MixedColor make_mixed(int &next_id, const std::vector<FilamentOptics> &fi
     mc.delta_e = 0.0f;
 
     return mc;
+}
+
+// One swatch per pair and per triple. Appended after blend dedup so existing
+// palette indices, which painted recipes address, stay put.
+static void append_coextruded_colors(std::vector<MixedColor> &colors, int &next_id,
+                                     const std::vector<FilamentOptics> &filaments, float layer_height,
+                                     int max_cycle_length, const std::vector<int> &unique_indices)
+{
+    const int n = (int) unique_indices.size();
+    if (n < 2)
+        return;
+    auto add = [&](const std::vector<int> &indices)
+    {
+        const float share = 1.f / float(indices.size());
+        std::vector<float> weights(indices.size(), share);
+        std::ostringstream ss;
+        ss << "Coex";
+        for (int idx : indices)
+            ss << " T" << idx;
+        MixedColor mc = make_mixed(next_id, filaments, layer_height, max_cycle_length, indices, weights, ss.str());
+        mc.coextruded = true;
+        mc.layer_pattern = indices;
+        mc.name = ss.str();
+        colors.push_back(std::move(mc));
+    };
+    for (int ui = 0; ui < n; ++ui)
+        for (int uj = ui + 1; uj < n; ++uj)
+            add({unique_indices[ui], unique_indices[uj]});
+    if (n >= 3)
+    {
+        for (int ui = 0; ui < n; ++ui)
+            for (int uj = ui + 1; uj < n; ++uj)
+                for (int uk = uj + 1; uk < n; ++uk)
+                    add({unique_indices[ui], unique_indices[uj], unique_indices[uk]});
+    }
 }
 
 void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filaments, float layer_height,
@@ -207,7 +243,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                     make_mixed(m_next_id, filaments, layer_height, max_cycle_length, {i, j}, {ratio_a, ratio_b}, name));
 
                 if ((int) m_colors.size() >= 512)
+                {
+                    append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                             unique_indices);
                     return;
+                }
             }
         }
     }
@@ -243,7 +283,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                         m_colors.push_back(make_mixed(m_next_id, filaments, layer_height, max_cycle_length,
                                                       {i, j, black_idx}, {w_i, w_j, level}, ss.str()));
                         if ((int) m_colors.size() >= 512)
+                        {
+                            append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                                     unique_indices);
                             return;
+                        }
                     }
                 }
             }
@@ -273,7 +317,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                         m_colors.push_back(make_mixed(m_next_id, filaments, layer_height, max_cycle_length,
                                                       {i, j, white_idx}, {w_i, w_j, level}, ss.str()));
                         if ((int) m_colors.size() >= 512)
+                        {
+                            append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                                     unique_indices);
                             return;
+                        }
                     }
                 }
             }
@@ -295,7 +343,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                 m_colors.push_back(make_mixed(m_next_id, filaments, layer_height, max_cycle_length, {i, black_idx},
                                               {1.0f - level, level}, name));
                 if ((int) m_colors.size() >= 512)
+                {
+                    append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                             unique_indices);
                     return;
+                }
             }
             if (white_idx >= 0)
             {
@@ -304,7 +356,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                 m_colors.push_back(make_mixed(m_next_id, filaments, layer_height, max_cycle_length, {i, white_idx},
                                               {1.0f - level, level}, name));
                 if ((int) m_colors.size() >= 512)
+                {
+                    append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                             unique_indices);
                     return;
+                }
             }
         }
     }
@@ -352,7 +408,11 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                                                       {w.a, w.b, w.c}, ss.str()));
 
                         if ((int) m_colors.size() >= 512)
+                        {
+                            append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length,
+                                                     unique_indices);
                             return;
+                        }
                     }
                 }
             }
@@ -376,6 +436,8 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
                                   [&seen_patterns](const MixedColor &mc)
                                   { return !seen_patterns.insert(mc.layer_pattern).second; }),
                    m_colors.end());
+
+    append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length, unique_indices);
 }
 
 int MixedColorPalette::add_custom(const ColorRGB &target, const std::string &name)
@@ -405,6 +467,36 @@ void MixedColorPalette::remove(int id)
     }
 }
 
+void MixedColorPalette::set_coex_rotation(size_t index, float degrees)
+{
+    if (index >= m_colors.size() || !m_colors[index].coextruded)
+        return;
+    float wrapped = std::fmod(degrees, 360.f);
+    if (wrapped < 0.f)
+        wrapped += 360.f;
+    m_colors[index].coex_rotation_deg = wrapped;
+}
+
+void MixedColorPalette::apply_saved_coex_rotations(const std::vector<ColorMixingRecipe> &recipes)
+{
+    for (const ColorMixingRecipe &rec : recipes)
+    {
+        if (!rec.is_coextruded())
+            continue;
+        for (MixedColor &mc : m_colors)
+        {
+            if (!mc.coextruded || (int) mc.layer_pattern.size() < (int) rec.coex_count)
+                continue;
+            bool match = true;
+            for (int k = 0; k < (int) rec.coex_count; ++k)
+                if (mc.layer_pattern[size_t(k)] != (int) rec.coex_extruders[k])
+                    match = false;
+            if (match)
+                mc.coex_rotation_deg = rec.coex_rotation_deg;
+        }
+    }
+}
+
 void MixedColorPalette::clear()
 {
     m_colors.clear();
@@ -419,9 +511,10 @@ void MixedColorPalette::recompute(const std::vector<FilamentOptics> &filaments, 
         if (!mc.enabled)
             continue;
 
-        if (!mc.user_override)
+        if (!mc.user_override && !mc.coextruded)
         {
-            // Re-optimize the pattern for this target color
+            // Re-optimize the pattern for this target color. Coextruded entries keep their
+            // tool list; that list is the shift order, not a dither cycle.
             mc.layer_pattern = ColorMixing::optimize_sequence(mc.target_color, filaments, max_cycle_length,
                                                               layer_height);
         }

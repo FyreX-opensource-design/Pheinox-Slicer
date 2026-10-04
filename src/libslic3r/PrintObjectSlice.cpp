@@ -1344,6 +1344,9 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     int extruder = 0;
                     int fallback_extruder = 0;
                     std::vector<int> pattern; // empty for locked entries
+                    // 2 or 3: walls of these tools are shifted apart. pattern is the tool order.
+                    uint8_t coex_count = 0;
+                    float coex_rotation_deg = 0.f;
                 };
                 std::map<int, StateResolution> resolution_cache;
 
@@ -1362,6 +1365,26 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             r.locked = true;
                             r.extruder = (int) rec.extruder_lock;
                             r.fallback_extruder = (int) rec.extruder_lock;
+                        }
+                        else if (rec.is_coextruded())
+                        {
+                            r.coex_count = rec.coex_count;
+                            r.coex_rotation_deg = rec.coex_rotation_deg;
+                            r.fallback_extruder = closest_pure_filament(rec.rgb);
+                            const int tool_limit = (int) num_extruders;
+                            for (int k = 0; k < (int) rec.coex_count; ++k)
+                            {
+                                const int tool = (int) rec.coex_extruders[k];
+                                if (tool >= 0 && tool < tool_limit)
+                                    r.pattern.push_back(tool);
+                            }
+                            if (r.pattern.size() < 2)
+                            {
+                                r.pattern.clear();
+                                r.coex_count = 0;
+                            }
+                            else
+                                r.fallback_extruder = r.pattern.front();
                         }
                         else
                         {
@@ -1464,17 +1487,38 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                         if (compact_state >= 1 && compact_state <= (int) compact_to_state.size())
                             original_state = compact_to_state[compact_state - 1];
 
-                        int physical_extruder;
+                        int physical_extruder = 0;
+                        // Coextrusion must not steal the painted area onto another extruder.
+                        // That split replaces the infill with a fresh perimeter shell, so the
+                        // preview shows walls where the infill was. The area stays on the part.
+                        bool coex_leave = false;
                         if (in_base && base_extruder >= 0)
                         {
-                            // Darkest/Lightest mode for base layers: route every painted region to
-                            // the single chosen filament regardless of recipe.
-                            physical_extruder = base_extruder;
+                            const StateResolution &r = resolve_state(original_state);
+                            if (r.coex_count >= 2)
+                            {
+                                if (!color_layer[idx].empty())
+                                    print_object.get_layer((int) layer_id)
+                                        ->color_mix_top_stripes.push_back(
+                                            {color_layer[idx], r.pattern, r.coex_count, r.coex_rotation_deg});
+                                coex_leave = true;
+                            }
+                            else
+                                // Darkest/Lightest mode for base layers: route every painted region to
+                                // the single chosen filament regardless of recipe.
+                                physical_extruder = base_extruder;
                         }
                         else
                         {
                             const StateResolution &r = resolve_state(original_state);
-                            if (r.locked)
+                            if (r.coex_count >= 2 && !color_layer[idx].empty())
+                            {
+                                print_object.get_layer((int) layer_id)
+                                    ->color_mix_top_stripes.push_back(
+                                        {color_layer[idx], r.pattern, r.coex_count, r.coex_rotation_deg});
+                                coex_leave = true;
+                            }
+                            else if (r.locked)
                                 physical_extruder = r.extruder;
                             else if (!r.pattern.empty())
                             {
@@ -1494,6 +1538,9 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                                 // silently dropping the region onto extruder 0.
                                 physical_extruder = r.fallback_extruder;
                         }
+                        if (coex_leave)
+                            continue;
+
                         physical_extruder = std::clamp(physical_extruder, 0, (int) num_extruders - 1);
 
                         size_t seg_idx = (size_t) physical_extruder;

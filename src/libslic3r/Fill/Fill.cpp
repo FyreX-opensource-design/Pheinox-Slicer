@@ -1891,7 +1891,7 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
 
     for (ColorMixTopStripe &stripe : color_mix_top_stripes)
     {
-        if (stripe.pattern.empty() || stripe.area.empty())
+        if (stripe.pattern.empty() || stripe.area.empty() || stripe.coex_count >= 2)
             continue;
         const std::vector<int> uniq = unique_in_order(stripe.pattern);
         if (uniq.size() != 2 && uniq.size() != 3)
@@ -2978,6 +2978,7 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
     }
 
     this->emit_color_mix_top_lines(color_mix_jobs);
+    this->emit_coex_partner_walls();
 
     for (LayerSlice &lslice : this->lslices_ex)
         for (LayerIsland &island : lslice.islands)

@@ -1303,7 +1303,7 @@ void TriangleSelector::set_facet(int facet_idx, TriangleStateType state)
 
 int TriangleSelector::paint_planar_image(
     const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
-    const std::function<std::optional<TriangleStateType>(const Vec3d &world_point)> &sample,
+    const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current)> &sample,
     const std::vector<unsigned char> *source_facets)
 {
     if (!sample || face_outward.squaredNorm() < 1e-16 || !(max_edge_world_mm > 0.f) || m_orig_size_indices <= 0)
@@ -1442,7 +1442,7 @@ int TriangleSelector::paint_planar_image(
             return;
         }
 
-        const std::optional<TriangleStateType> state = sample((p0 + p1 + p2) / 3.0);
+        const std::optional<TriangleStateType> state = sample((p0 + p1 + p2) / 3.0, tr.get_state());
         if (!state)
             return;
         m_triangles[facet_idx].set_state(*state);

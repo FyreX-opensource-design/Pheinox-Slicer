@@ -164,7 +164,8 @@ static constexpr const char *SOURCE_IN_METERS_KEY = "source_in_meters";
 static constexpr const char *SOURCE_IS_BUILTIN_VOLUME_KEY = "source_is_builtin_volume";
 
 // Color mixing palette is serialized as a per-volume metadata entry.
-// Format: "RRGGBB:lock,RRGGBB:lock,..." where lock is an integer
+// Format: "RRGGBB:lock,RRGGBB:lock,..." where lock is an integer.
+// A coextruded entry appends "@count:e0:e1:e2:degrees" (count is 2 or 3).
 // (-1 = color-match, 0+ = force that extruder).
 static constexpr const char *COLOR_MIXING_PALETTE_KEY = "color_mixing_palette";
 
@@ -335,18 +336,23 @@ namespace Slic3r
 
 // Serialize a per-volume color mixing palette to a compact string.
 // Format: "RRGGBB:lock,RRGGBB:lock,..." where RRGGBB is 6 hex digits and lock is a signed int
-// (-1 for color-match, >= 0 for a forced extruder). Empty palette returns an empty string.
+// (-1 for color-match, >= 0 for a forced extruder). A coextruded entry appends
+// "@count:e0:e1:e2:degrees". Empty palette returns an empty string.
 static std::string serialize_color_mixing_palette(const std::vector<ColorMixingRecipe> &palette)
 {
     if (palette.empty())
         return {};
     std::string out;
-    out.reserve(palette.size() * 11);
+    out.reserve(palette.size() * 16);
     for (size_t i = 0; i < palette.size(); ++i)
     {
         const ColorMixingRecipe &r = palette[i];
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%06X:%d", (unsigned) (r.rgb & 0xFFFFFFu), (int) r.extruder_lock);
+        char buf[80];
+        int written = std::snprintf(buf, sizeof(buf), "%06X:%d", (unsigned) (r.rgb & 0xFFFFFFu), (int) r.extruder_lock);
+        if (r.is_coextruded() && written > 0 && written < (int) sizeof(buf))
+            std::snprintf(buf + written, sizeof(buf) - (size_t) written, "@%u:%d:%d:%d:%.1f",
+                          (unsigned) r.coex_count, (int) r.coex_extruders[0], (int) r.coex_extruders[1],
+                          (int) r.coex_extruders[2], r.coex_rotation_deg);
         if (i > 0)
             out += ',';
         out += buf;
@@ -397,7 +403,29 @@ static std::vector<ColorMixingRecipe> parse_color_mixing_palette(const std::stri
         // Safe: we just verified exactly 6 hex digits sit at [pos, colon).
         std::sscanf(s.c_str() + pos, "%6x", &rgb);
         std::sscanf(s.c_str() + colon + 1, "%d", &lock);
-        palette.emplace_back((uint32_t) (rgb & 0xFFFFFFu), (int8_t) std::clamp(lock, -1, MAX_LOCK_EXTRUDER));
+        ColorMixingRecipe rec((uint32_t) (rgb & 0xFFFFFFu), (int8_t) std::clamp(lock, -1, MAX_LOCK_EXTRUDER));
+        const size_t at = s.find('@', colon + 1);
+        if (at != std::string::npos && at < comma)
+        {
+            int count = 0;
+            int e0 = -1, e1 = -1, e2 = -1;
+            float rotation = 0.f;
+            if (std::sscanf(s.c_str() + at + 1, "%d:%d:%d:%d:%f", &count, &e0, &e1, &e2, &rotation) == 5 &&
+                (count == 2 || count == 3))
+            {
+                auto clamp_tool = [&](int tool) -> int8_t
+                { return (int8_t) std::clamp(tool, -1, MAX_LOCK_EXTRUDER); };
+                rec.coex_count = (uint8_t) count;
+                rec.coex_extruders[0] = clamp_tool(e0);
+                rec.coex_extruders[1] = clamp_tool(e1);
+                rec.coex_extruders[2] = clamp_tool(e2);
+                rotation = std::fmod(rotation, 360.f);
+                if (rotation < 0.f)
+                    rotation += 360.f;
+                rec.coex_rotation_deg = rotation;
+            }
+        }
+        palette.push_back(rec);
         pos = comma + 1;
     }
     return palette;

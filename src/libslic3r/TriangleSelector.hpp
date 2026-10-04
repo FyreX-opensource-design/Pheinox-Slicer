@@ -476,7 +476,8 @@ public:
     // `source_facets`, when set, is one flag per original triangle. Only those triangles are painted.
     int paint_planar_image(
         const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
-        const std::function<std::optional<TriangleStateType>(const Vec3d &world_point)> &sample,
+        const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current)>
+            &sample,
         const std::vector<unsigned char> *source_facets = nullptr);
 
     // Remap all triangle states using a mapping function. Used to compact color mixing

@@ -243,8 +243,29 @@ public:
     {
         ExPolygons area;
         std::vector<int> pattern;
+        // 0 keeps the layer-blend wall recess. 2 or 3 shifts those tools' walls apart.
+        // pattern lists the tools in shift order. rotation_deg spins the shift.
+        uint8_t coex_count{0};
+        float coex_rotation_deg{0.f};
     };
     std::vector<ColorMixTopStripe> color_mix_top_stripes;
+    // Outer-wall pieces copied for the other coextrusion tools. Infill is not touched.
+    // Captured before the home tool's outer wall is nudged, then emitted with the fills
+    // so each partner tool prints its own shifted outer bead.
+    struct CoexPartnerWall
+    {
+        Polyline polyline;
+        float width{0.f};
+        float height{0.f};
+        double mm3_per_mm{0.};
+        int home_filament{-1};
+        int slice_index{0};
+        int island_index{0};
+        std::vector<int> tools;
+        uint8_t coex_count{0};
+        float rotation_deg{0.f};
+    };
+    std::vector<CoexPartnerWall> coex_partner_walls;
     std::vector<size_t> lslice_indices_sorted_by_print_order;
     LayerSlices lslices_ex;
 
@@ -812,6 +833,7 @@ protected:
     std::vector<ColorMixTopStripe> clip_color_mix_tops();
     // Dither painted top infill and the wall loops around it in the mix ratio.
     void emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs);
+    void emit_coex_partner_walls();
 
 private:
     // Real-time check of this layer's generated widths against the width warning maximum;

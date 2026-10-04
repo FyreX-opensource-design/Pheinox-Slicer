@@ -48,7 +48,8 @@ TriangleStateType GLGizmoColorMixing::get_left_button_state_type() const
 
 TriangleStateType GLGizmoColorMixing::get_right_button_state_type() const
 {
-    if (m_eraser_mode)
+    // The pen's eraser end clears paint back to the volume's own filament.
+    if (m_stylus_eraser || m_eraser_mode)
         return TriangleStateType::NONE;
     return TriangleStateType(m_second_selected_color_idx + 1);
 }
@@ -101,7 +102,248 @@ void GLGizmoColorMixing::on_opening()
     if (m_filament_optics.empty() || palette_inputs_changed())
         init_palette();
 
+    refresh_brush_catalog();
     m_old_mo_id = ObjectID();
+}
+
+void GLGizmoColorMixing::refresh_brush_catalog()
+{
+    const std::string selected = (m_brush_choice > 0 && m_brush_choice <= int(m_brush_entries.size()))
+                                     ? m_brush_entries[size_t(m_brush_choice - 1)].key
+                                     : std::string{};
+    m_brush_entries = scan_installed_paint_brushes();
+    m_brush_labels.clear();
+    m_brush_labels.emplace_back(_u8L("Solid"));
+    m_brush_choice = 0;
+    for (size_t i = 0; i < m_brush_entries.size(); ++i)
+    {
+        m_brush_labels.push_back(m_brush_entries[i].label);
+        if (!selected.empty() && m_brush_entries[i].key == selected)
+            m_brush_choice = int(i) + 1;
+    }
+    if (m_brush_choice == 0)
+        m_brush_tip.reset();
+}
+
+static Vec2d brush_world_to_screen(const Camera &camera, const Vec3d &world)
+{
+    const std::array<int, 4> &viewport = camera.get_viewport();
+    const Eigen::Vector4d clip =
+        camera.get_projection_matrix().matrix() *
+        (camera.get_view_matrix().matrix() * Eigen::Vector4d(world.x(), world.y(), world.z(), 1.0));
+    if (!(std::abs(clip.w()) > 1e-8))
+        return Vec2d(1.0e10, 1.0e10);
+    const double inv_w = 1.0 / clip.w();
+    const double ndc_x = clip.x() * inv_w;
+    const double ndc_y = clip.y() * inv_w;
+    const double x = viewport[0] + (ndc_x + 1.0) * 0.5 * viewport[2];
+    const double gl_y = (ndc_y + 1.0) * 0.5 * viewport[3];
+    return Vec2d(x, double(viewport[3]) - gl_y);
+}
+
+static uint32_t pack_rgb(const ColorRGB &color)
+{
+    return (uint32_t(color.r_uchar()) << 16) | (uint32_t(color.g_uchar()) << 8) | uint32_t(color.b_uchar());
+}
+
+// Squared distance from a point to a triangle (Ericson, Real-Time Collision Detection).
+static double point_triangle_distance_sq(const Vec3d &point, const Vec3d &a, const Vec3d &b, const Vec3d &c)
+{
+    const Vec3d ab = b - a;
+    const Vec3d ac = c - a;
+    const Vec3d ap = point - a;
+    const double d1 = ab.dot(ap);
+    const double d2 = ac.dot(ap);
+    if (d1 <= 0.0 && d2 <= 0.0)
+        return ap.squaredNorm();
+
+    const Vec3d bp = point - b;
+    const double d3 = ab.dot(bp);
+    const double d4 = ac.dot(bp);
+    if (d3 >= 0.0 && d4 <= d3)
+        return bp.squaredNorm();
+
+    const double vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+    {
+        const double v = d1 / (d1 - d3);
+        return (ap - ab * v).squaredNorm();
+    }
+
+    const Vec3d cp = point - c;
+    const double d5 = ab.dot(cp);
+    const double d6 = ac.dot(cp);
+    if (d6 >= 0.0 && d5 <= d6)
+        return cp.squaredNorm();
+
+    const double vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+    {
+        const double w = d2 / (d2 - d6);
+        return (ap - ac * w).squaredNorm();
+    }
+
+    const double va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
+    {
+        const double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (bp - (c - b) * w).squaredNorm();
+    }
+
+    const double denom = 1.0 / (va + vb + vc);
+    const double v = vb * denom;
+    const double w = vc * denom;
+    return (ap - ab * v - ac * w).squaredNorm();
+}
+
+bool GLGizmoColorMixing::stamp_paint_brush(const Vec2d &mouse_position, bool second_color, bool clear_to_default,
+                                           bool hard_clear)
+{
+    if (!m_brush_tip || m_triangle_selectors.empty() || m_modified_colors.empty())
+        return false;
+
+    const Camera &camera = m_parent.get_camera();
+    const Selection &selection = m_parent.get_selection();
+    ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr || selection.get_instance_idx() < 0 ||
+        selection.get_instance_idx() >= int(mo->instances.size()))
+        return false;
+    const ModelInstance *mi = mo->instances[selection.get_instance_idx()];
+
+    std::vector<Transform3d> trafos;
+    std::vector<const ModelVolume *> volumes;
+    for (const ModelVolume *mv : mo->volumes)
+    {
+        if (!mv->is_model_part())
+            continue;
+        trafos.emplace_back(mi->get_transformation().get_matrix() * mv->get_matrix());
+        volumes.push_back(mv);
+    }
+    update_raycast_cache(mouse_position, camera, trafos);
+    if (m_rr.mesh_id < 0 || m_rr.mesh_id >= int(m_triangle_selectors.size()) ||
+        m_rr.mesh_id >= int(volumes.size()))
+        return m_brush_stamp_valid;
+
+    const PaintBrushTip &tip = *m_brush_tip;
+    const float pressure = m_stylus_pressure >= 0.f ? m_stylus_pressure : 1.f;
+    float radius = m_cursor_radius;
+    if (m_stylus_pressure >= 0.f)
+        radius = tip.size_uses_pressure ? m_cursor_radius * tip.size_factor(pressure) : effective_brush_radius();
+    radius = std::max(radius, get_cursor_radius_min());
+    const float radius_px = float(double(radius) * camera.get_zoom());
+    if (!(radius_px > 1.f))
+        return false;
+
+    const float step = std::max(tip.spacing, 0.35f) * radius_px * 2.f;
+    std::vector<Vec2d> dabs;
+    if (!m_brush_stamp_valid)
+    {
+        dabs.push_back(mouse_position);
+    }
+    else
+    {
+        const Vec2d delta = mouse_position - m_brush_stamp_cursor;
+        const double distance = delta.norm();
+        if (distance < double(step) * 0.5)
+            return true;
+        const int count = std::min(8, std::max(1, int(distance / double(step))));
+        for (int i = 1; i <= count; ++i)
+            dabs.push_back(m_brush_stamp_cursor + delta * (double(i) / double(count)));
+    }
+
+    const int mesh_id = m_rr.mesh_id;
+    const Transform3d &trafo = trafos[size_t(mesh_id)];
+    const ModelVolume *volume = volumes[size_t(mesh_id)];
+    const indexed_triangle_set &its = volume->mesh().its;
+    const Vec3d hit_world = trafo * m_rr.hit.cast<double>();
+    Vec3d toward_camera = camera.get_position() - hit_world;
+    if (toward_camera.squaredNorm() < 1e-12)
+        return false;
+    toward_camera.normalize();
+
+    const size_t paint_idx = second_color ? m_second_selected_color_idx : m_first_selected_color_idx;
+    const ColorRGB paint_color =
+        paint_idx < m_modified_colors.size()
+            ? ColorRGB(m_modified_colors[paint_idx].r(), m_modified_colors[paint_idx].g(), m_modified_colors[paint_idx].b())
+            : ColorRGB::WHITE();
+    ColorRGB default_color = paint_color;
+    if (const auto *painted = dynamic_cast<const TriangleSelectorMmGui *>(m_triangle_selectors[size_t(mesh_id)].get()))
+        default_color = ColorRGB(painted->default_volume_color().r(), painted->default_volume_color().g(),
+                                  painted->default_volume_color().b());
+    const size_t default_extruder =
+        ModelVolume::get_extruder_color_idx(*volume, std::max(1, int(m_original_colors.size())));
+
+    auto color_of = [&](TriangleStateType state) -> ColorRGB
+    {
+        if (state == TriangleStateType::NONE)
+            return default_color;
+        const size_t idx = size_t(state) - 1;
+        if (idx < m_modified_colors.size())
+            return ColorRGB(m_modified_colors[idx].r(), m_modified_colors[idx].g(), m_modified_colors[idx].b());
+        return default_color;
+    };
+
+    const double reach = double(radius) * 1.35;
+    const double reach_sq = reach * reach;
+    std::vector<unsigned char> facet_mask(its.indices.size(), 0);
+    const int seed = int(m_rr.facet);
+    for (int face = 0; face < int(its.indices.size()); ++face)
+    {
+        if (face == seed)
+        {
+            facet_mask[size_t(face)] = 1;
+            continue;
+        }
+        const Vec3f &v0 = its.vertices[its.indices[size_t(face)][0]];
+        const Vec3f &v1 = its.vertices[its.indices[size_t(face)][1]];
+        const Vec3f &v2 = its.vertices[its.indices[size_t(face)][2]];
+        const Vec3d w0 = trafo * v0.cast<double>();
+        const Vec3d w1 = trafo * v1.cast<double>();
+        const Vec3d w2 = trafo * v2.cast<double>();
+        if (point_triangle_distance_sq(hit_world, w0, w1, w2) <= reach_sq)
+            facet_mask[size_t(face)] = 1;
+    }
+
+    int assigned = 0;
+    for (const Vec2d &dab : dabs)
+    {
+        assigned += m_triangle_selectors[size_t(mesh_id)]->paint_planar_image(
+            trafo, toward_camera, 0.15f, std::max(radius / 8.f, 0.05f),
+            [&](const Vec3d &world_point, TriangleStateType current) -> std::optional<TriangleStateType>
+            {
+                const Vec2d screen = brush_world_to_screen(camera, world_point);
+                const float u = float((screen.x() - dab.x()) / double(radius_px * 2.f) + 0.5);
+                const float v = float((screen.y() - dab.y()) / double(radius_px * 2.f) + 0.5);
+                if (u < 0.f || u > 1.f || v < 0.f || v > 1.f)
+                    return std::nullopt;
+                const float alpha = tip.coverage(u, v, pressure);
+                if (alpha < 0.03f)
+                    return std::nullopt;
+                // Shift clears in the shape of the tip. A firm eraser dab clears back to unpainted.
+                if (hard_clear && alpha > 0.25f)
+                    return TriangleStateType::NONE;
+                if (clear_to_default && alpha > 0.92f)
+                    return TriangleStateType::NONE;
+                if (!clear_to_default && alpha > 0.97f)
+                    return TriangleStateType(int(paint_idx) + 1);
+                const ColorRGB under = color_of(current);
+                const ColorRGB over = clear_to_default ? default_color : paint_color;
+                const ColorRGB mixed = under * (1.f - alpha) + over * alpha;
+                const int best = m_palette.find_best_match(pack_rgb(mixed));
+                if (best < 0)
+                    return std::nullopt;
+                if (clear_to_default && size_t(best) == default_extruder)
+                    return TriangleStateType::NONE;
+                return TriangleStateType(best + 1);
+            },
+            &facet_mask);
+    }
+    (void) assigned;
+    m_brush_stamp_cursor = mouse_position;
+    m_brush_stamp_valid = true;
+    m_triangle_selectors[size_t(mesh_id)]->request_update_render_data();
+    m_parent.set_as_dirty();
+    return true;
 }
 
 void GLGizmoColorMixing::on_shutdown()
@@ -418,7 +660,7 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
         const double v_span = vmax - vmin;
         assigned += m_triangle_selectors[selector_idx]->paint_planar_image(
             trafo, projection.face, min_dot, m_image_detail_mm,
-            [&](const Vec3d &world_point) -> std::optional<TriangleStateType>
+            [&](const Vec3d &world_point, TriangleStateType) -> std::optional<TriangleStateType>
             {
                 const double u = (world_point.dot(projection.right) - umin) / u_span;
                 const double v = (world_point.dot(projection.up) - vmin) / v_span;
@@ -468,6 +710,15 @@ void GLGizmoColorMixing::init_palette()
     m_palette.clear();
     if (m_filament_optics.size() >= 2)
         m_palette.auto_generate(m_filament_optics, m_layer_height, 12, 10);
+    if (const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr)
+    {
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv->is_model_part() && !mv->color_mixing_palette.empty())
+            {
+                m_palette.apply_saved_coex_rotations(mv->color_mixing_palette);
+                break;
+            }
+    }
 
     // Preserve the user's picked swatch indices across regeneration so a mid-paint filament
     // edit doesn't reset their brush selection. rebuild_modified_colors uses find_best_match
@@ -595,6 +846,25 @@ bool GLGizmoColorMixing::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
             apply_mapped_image(m_rr.mesh_id, int(m_rr.facet));
         return true;
     }
+    if (action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
+        m_brush_stamp_valid = false;
+
+    const bool brush_stamp = m_brush_tip && m_tool_type == ToolType::BRUSH &&
+                             m_cursor_type != TriangleSelector::CursorType::POINTER && !control_down && !is_pick;
+    if (brush_stamp &&
+        (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown ||
+         (action == SLAGizmoEventType::Dragging && pressed_button() != Button::None)))
+    {
+        if (action == SLAGizmoEventType::LeftDown)
+            remember_pressed_button(Button::Left);
+        else if (action == SLAGizmoEventType::RightDown)
+            remember_pressed_button(Button::Right);
+        const bool clear = shift_down || m_stylus_eraser || m_eraser_mode;
+        const bool second = pressed_button() == Button::Right && !clear;
+        if (stamp_paint_brush(mouse_position, second, clear, shift_down))
+            return true;
+    }
+
     if (!is_pick)
         return GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
 
@@ -805,6 +1075,20 @@ ColorRGBA GLGizmoColorMixing::get_cursor_sphere_left_button_color() const
 
 ColorRGBA GLGizmoColorMixing::get_cursor_sphere_right_button_color() const
 {
+    if (m_stylus_eraser)
+    {
+        if (m_rr.mesh_id >= 0 && m_rr.mesh_id < int(m_triangle_selectors.size()))
+        {
+            if (const auto *painted = dynamic_cast<const TriangleSelectorMmGui *>(
+                    m_triangle_selectors[m_rr.mesh_id].get()))
+            {
+                ColorRGBA color = painted->default_volume_color();
+                color.a(0.25f);
+                return color;
+            }
+        }
+        return {0.75f, 0.75f, 0.75f, 0.25f};
+    }
     if (m_second_selected_color_idx < m_modified_colors.size())
     {
         ColorRGBA color = m_modified_colors[m_second_selected_color_idx];
@@ -907,6 +1191,8 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         // size fall back to tier 1 so they're always visible.
         auto entry_tier = [this](size_t idx) -> int
         {
+            if (idx < m_palette.colors().size() && m_palette.colors()[idx].coextruded)
+                return 4;
             if (idx >= m_palette.colors().size())
                 return 1;
             const auto &pat = m_palette.colors()[idx].layer_pattern;
@@ -919,15 +1205,15 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         };
 
         // Bucket indices into the three tiers, preserving generation order within each tier.
-        std::array<std::vector<size_t>, 3> tiers;
+        std::array<std::vector<size_t>, 4> tiers;
         for (size_t i = 0; i < m_modified_colors.size(); ++i)
             tiers[entry_tier(i) - 1].push_back(i);
 
-        const std::array<std::string, 3> tier_labels = {_u8L("Single colors"), _u8L("2-way colors"),
-                                                        _u8L("3-way colors")};
+        const std::array<std::string, 4> tier_labels = {_u8L("Single colors"), _u8L("2-way colors"),
+                                                        _u8L("3-way colors"), _u8L("Coextruded")};
 
         bool first_section = true;
-        for (int t = 0; t < 3; ++t)
+        for (int t = 0; t < 4; ++t)
         {
             if (tiers[t].empty())
                 continue;
@@ -960,7 +1246,11 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
                     const auto &mc = m_palette.colors()[i];
                     ImGui::BeginTooltip();
                     ImGui::Text("%s", mc.name.c_str());
-                    if (mc.layer_pattern.size() <= 1)
+                    if (mc.coextruded)
+                        ImGui::TextDisabled("%s", _u8L("Shifts these tools' walls apart so the colors show together. "
+                                                       "Rotation turns which color faces which way.")
+                                                      .c_str());
+                    else if (mc.layer_pattern.size() <= 1)
                         ImGui::TextDisabled("%s", _u8L("Single filament -- no swaps").c_str());
                     else
                         ImGui::TextDisabled("%s", GUI::format(_L("Repeats every %1% layers (%2% swaps per cycle)"),
@@ -978,6 +1268,38 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         }
 
         ImGui::EndChild();
+
+        if (m_first_selected_color_idx < m_palette.colors().size() &&
+            m_palette.colors()[m_first_selected_color_idx].coextruded)
+        {
+            float rotation = m_palette.colors()[m_first_selected_color_idx].coex_rotation_deg;
+            ImGui::AlignTextToFramePadding();
+            ImGuiPureWrap::text(_u8L("Wall rotation"));
+            ImGui::SameLine();
+            ImGui::PushItemWidth(slider_width);
+            if (m_imgui->slider_float("##coex_rotation", &rotation, 0.f, 360.f, "%.0f°", 1.f, true,
+                                      _u8L("Which color faces which way")))
+            {
+                m_palette.set_coex_rotation(m_first_selected_color_idx, rotation);
+                if (ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr)
+                {
+                    for (ModelVolume *mv : mo->volumes)
+                    {
+                        if (m_first_selected_color_idx >= mv->color_mixing_palette.size())
+                            continue;
+                        ColorMixingRecipe &rec = mv->color_mixing_palette[m_first_selected_color_idx];
+                        if (rec.is_coextruded())
+                            rec.coex_rotation_deg = m_palette.colors()[m_first_selected_color_idx].coex_rotation_deg;
+                    }
+                }
+            }
+            ImGui::PopItemWidth();
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", _u8L("Two colors shift along the line between them. A third color shifts off "
+                                           "the midpoint of those two.")
+                                        .c_str());
+            ImGui::PopTextWrapPos();
+        }
     }
 
     ImGui::Separator();
@@ -1046,6 +1368,42 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         ImGui::SameLine();
         if (ImGuiPureWrap::radio_button(m_desc["pointer"], m_cursor_type == TriangleSelector::CursorType::POINTER))
             m_cursor_type = TriangleSelector::CursorType::POINTER;
+
+        if (m_brush_labels.empty())
+            refresh_brush_catalog();
+        ImGui::AlignTextToFramePadding();
+        ImGuiPureWrap::text(_u8L("Brush tip"));
+        ImGui::SameLine();
+        int brush_choice = m_brush_choice;
+        if (ImGuiPureWrap::combo("##paint_brush_tip", m_brush_labels, brush_choice, 0, 0.f, m_imgui->scaled(14.f)) &&
+            brush_choice != m_brush_choice)
+        {
+            m_brush_choice = brush_choice;
+            m_brush_stamp_valid = false;
+            if (m_brush_choice <= 0 || m_brush_choice > int(m_brush_entries.size()))
+            {
+                m_brush_choice = 0;
+                m_brush_tip.reset();
+            }
+            else
+            {
+                PaintBrushTip loaded;
+                if (!load_paint_brush(m_brush_entries[size_t(m_brush_choice - 1)], loaded))
+                {
+                    m_parent.get_notification_manager()->push_notification(
+                        _u8L("Could not read that brush. The solid brush is still available."));
+                    m_brush_choice = 0;
+                    m_brush_tip.reset();
+                }
+                else
+                    m_brush_tip = std::move(loaded);
+            }
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", _u8L("A soft or pressure-faded dab blends over the color already there, then snaps "
+                                       "to the nearest virtual filament.")
+                                    .c_str());
+        ImGui::PopTextWrapPos();
 
         m_imgui->disabled_begin(m_cursor_type != TriangleSelector::CursorType::SPHERE &&
                                 m_cursor_type != TriangleSelector::CursorType::CIRCLE);

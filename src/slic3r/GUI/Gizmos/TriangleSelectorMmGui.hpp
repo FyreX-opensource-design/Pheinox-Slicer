@@ -88,6 +88,7 @@ public:
     ~TriangleSelectorMmGui() override = default;
 
     void render(ImGuiWrapper *imgui, const Transform3d &matrix, const Camera &camera) override;
+    const ColorRGBA &default_volume_color() const { return m_default_volume_color; }
 
 private:
     void update_render_data();

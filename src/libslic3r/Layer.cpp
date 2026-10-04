@@ -1080,7 +1080,449 @@ void apply_color_mix_overhang_collection(ExtrusionEntityCollection &collection,
     collection.entities.swap(kept);
 }
 
+// Distance each coextruded tool's wall moves off the nominal path. Two tools sit on
+// opposite ends of a line. A third tool sits off the midpoint of that pair, perpendicular
+// to the line. rotation_deg spins the whole arrangement.
+Vec2d coex_wall_shift_mm(int filament, const std::vector<int> &tools, uint8_t count, float rotation_deg,
+                         float nozzle_mm)
+{
+    if (count < 2 || tools.size() < 2)
+        return Vec2d::Zero();
+    const float reach = std::clamp(0.55f * nozzle_mm, 0.15f, 0.5f);
+    const double rad = double(rotation_deg) * (M_PI / 180.0);
+    const Vec2d along(std::cos(rad), std::sin(rad));
+    const Vec2d across(-along.y(), along.x());
+    if (count >= 3 && tools.size() >= 3 && filament == tools[2])
+        return across * double(reach);
+    if (filament == tools[0])
+        return along * double(-reach);
+    if (filament == tools[1])
+        return along * double(reach);
+    return Vec2d::Zero();
+}
+
+struct CoexShiftJob
+{
+    const ExPolygons *area{nullptr};
+    // Tool offset in mm. The outer wall bulges along its own outward normal by the part of
+    // this vector that points outward. remove drops the bead instead, so another tool can
+    // print it once on this layer.
+    Vec2d shift_mm{Vec2d::Zero()};
+    bool remove{false};
+};
+
+// Which coextruded tool owns this layer's single outer wall. Two tools alternate.
+// Three tools cycle. The other tools do not print a wall on this layer.
+int coex_layer_tool(const std::vector<int> &tools, uint8_t count, size_t layer_id)
+{
+    const int n = std::min(int(count), int(tools.size()));
+    if (n < 2)
+        return -1;
+    return tools[layer_id % size_t(n)];
+}
+
+int coex_shift_job_at(const Point &point, const std::vector<CoexShiftJob> &jobs)
+{
+    for (size_t i = 0; i < jobs.size(); ++i)
+        if (jobs[i].area != nullptr && point_in_expolygons(*jobs[i].area, point))
+            return int(i);
+    return -1;
+}
+
+// Push the outer wall outward where this tool's offset points. Inward motion is dropped
+// so the bead does not slide into the inner walls, and the two colors do not share a face.
+void nudge_outer_wall(Polyline &polyline, const Vec2d &shift_mm, const ExPolygons &slices)
+{
+    if (polyline.size() < 2 || shift_mm.squaredNorm() < 1e-8)
+        return;
+    const bool closed = polyline.points.front() == polyline.points.back();
+    std::vector<Vec2d> normals(polyline.size(), Vec2d::Zero());
+    const size_t segment_count = closed ? polyline.size() - 1 : polyline.size();
+    for (size_t i = 1; i < segment_count; ++i)
+    {
+        const Vec2d normal = outward_normal(polyline.points[i - 1], polyline.points[i], slices);
+        normals[i - 1] += normal;
+        normals[i] += normal;
+    }
+    if (closed && polyline.size() > 2)
+    {
+        const Vec2d normal = outward_normal(polyline.points[polyline.size() - 2], polyline.points.back(), slices);
+        normals[polyline.size() - 2] += normal;
+        normals.front() += normal;
+        normals.back() = normals.front();
+    }
+    for (size_t i = 0; i < polyline.size(); ++i)
+    {
+        const double length = normals[i].norm();
+        if (length < 1e-8)
+            continue;
+        normals[i] /= length;
+        const double outward_mm = normals[i].dot(shift_mm);
+        if (outward_mm < 0.02)
+            continue;
+        const double distance = scale_(outward_mm);
+        polyline.points[i].x() += coord_t(std::llround(normals[i].x() * distance));
+        polyline.points[i].y() += coord_t(std::llround(normals[i].y() * distance));
+    }
+}
+
+// True when `path` must be replaced by `out`. Only the outer wall moves. Inner walls
+// stay on the infill so the shell does not slide off the rest of the layer.
+bool shift_coex_wall(ExtrusionPath &path, std::vector<ExtrusionPath> &out, const std::vector<CoexShiftJob> &jobs,
+                     const ExPolygons &slices)
+{
+    out.clear();
+    if (!path.role().is_external_perimeter() || path.role().is_bridge() || path.polyline.size() < 2)
+        return false;
+    std::vector<Point> samples;
+    samples.reserve(path.polyline.size());
+    samples.push_back(path.polyline.points.front());
+    for (size_t i = 1; i < path.polyline.size(); ++i)
+    {
+        const Point &from = path.polyline.points[i - 1];
+        const Point &to = path.polyline.points[i];
+        const double length_mm = unscale<double>(std::hypot(double(to.x() - from.x()), double(to.y() - from.y())));
+        const int steps = std::max(1, int(std::ceil(length_mm)));
+        for (int step = 1; step <= steps; ++step)
+        {
+            if (step == steps)
+                samples.push_back(to);
+            else
+                samples.emplace_back(
+                    coord_t(std::llround(double(from.x()) + double(to.x() - from.x()) * step / steps)),
+                    coord_t(std::llround(double(from.y()) + double(to.y() - from.y()) * step / steps)));
+        }
+    }
+
+    struct Run
+    {
+        Polyline polyline;
+        int job{-1};
+    };
+    std::vector<Run> pieces;
+    Run current;
+    current.job = coex_shift_job_at(samples.front(), jobs);
+    current.polyline.points.push_back(samples.front());
+    for (size_t i = 1; i < samples.size(); ++i)
+    {
+        const int job = coex_shift_job_at(samples[i], jobs);
+        if (job != current.job)
+        {
+            current.polyline.points.push_back(samples[i]);
+            if (current.polyline.size() >= 2)
+                pieces.push_back(std::move(current));
+            current = Run{};
+            current.job = job;
+            current.polyline.points.push_back(samples[i]);
+        }
+        else
+            current.polyline.points.push_back(samples[i]);
+    }
+    if (current.polyline.size() >= 2)
+        pieces.push_back(std::move(current));
+
+    bool painted = false;
+    for (const Run &run : pieces)
+        if (run.job >= 0)
+            painted = true;
+    if (!painted)
+        return false;
+
+    if (pieces.size() == 1)
+    {
+        const int job = pieces.front().job;
+        if (job < 0)
+            return false;
+        if (jobs[size_t(job)].remove)
+        {
+            out.clear();
+            return true;
+        }
+        nudge_outer_wall(path.polyline, jobs[size_t(job)].shift_mm, slices);
+        return false;
+    }
+
+    out.reserve(pieces.size());
+    for (const Run &run : pieces)
+    {
+        if (run.job >= 0 && jobs[size_t(run.job)].remove)
+            continue;
+        ExtrusionPath piece(run.polyline, path.attributes());
+        if (run.job >= 0)
+            nudge_outer_wall(piece.polyline, jobs[size_t(run.job)].shift_mm, slices);
+        out.push_back(std::move(piece));
+    }
+    return true;
+}
+
+bool shift_coex_wall_paths(ExtrusionPaths &paths, std::vector<ExtrusionPath> &out, const std::vector<CoexShiftJob> &jobs,
+                           const ExPolygons &slices)
+{
+    bool split = false;
+    std::vector<ExtrusionPath> produced;
+    for (ExtrusionPath &path : paths)
+    {
+        std::vector<ExtrusionPath> pieces;
+        if (shift_coex_wall(path, pieces, jobs, slices))
+        {
+            split = true;
+            for (ExtrusionPath &piece : pieces)
+                produced.push_back(std::move(piece));
+        }
+        else
+            produced.push_back(path);
+    }
+    if (split)
+        out = std::move(produced);
+    return split;
+}
+
+void apply_coex_wall_shift_collection(ExtrusionEntityCollection &collection, const std::vector<CoexShiftJob> &jobs,
+                                      const ExPolygons &slices)
+{
+    if (jobs.empty())
+        return;
+    ExtrusionEntitiesPtr kept;
+    kept.reserve(collection.entities.size());
+    for (ExtrusionEntity *entity : collection.entities)
+    {
+        if (auto *child = dynamic_cast<ExtrusionEntityCollection *>(entity))
+        {
+            apply_coex_wall_shift_collection(*child, jobs, slices);
+            kept.push_back(entity);
+            continue;
+        }
+
+        std::vector<ExtrusionPath> pieces;
+        bool split = false;
+        if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity))
+            split = shift_coex_wall_paths(loop->paths, pieces, jobs, slices);
+        else if (auto *multi = dynamic_cast<ExtrusionMultiPath *>(entity))
+            split = shift_coex_wall_paths(multi->paths, pieces, jobs, slices);
+        else if (auto *path = dynamic_cast<ExtrusionPath *>(entity))
+            split = shift_coex_wall(*path, pieces, jobs, slices);
+
+        if (!split)
+        {
+            kept.push_back(entity);
+            continue;
+        }
+        delete entity;
+        for (ExtrusionPath &piece : pieces)
+            kept.push_back(new ExtrusionPath(std::move(piece)));
+    }
+    collection.entities.swap(kept);
+}
+
+// Copy the outer wall, still on its original path, for the other coextrusion tools.
+// The home tool is nudged in place afterwards. Partners are emitted later as extra
+// outer beads, so the infill underneath is never replaced.
+void capture_coex_partner_walls(Layer &layer, const std::vector<const Layer::ColorMixTopStripe *> &stripes)
+{
+    layer.coex_partner_walls.clear();
+    if (stripes.empty())
+        return;
+
+    auto stripe_at = [&](const Point &point) -> int
+    {
+        for (size_t i = 0; i < stripes.size(); ++i)
+            if (stripes[i] != nullptr && point_in_expolygons(stripes[i]->area, point))
+                return int(i);
+        return -1;
+    };
+
+    auto take_path = [&](const ExtrusionPath &path, int home_filament, int slice_index, int island_index)
+    {
+        if (!path.role().is_external_perimeter() || path.role().is_bridge() || path.polyline.size() < 2)
+            return;
+
+        std::vector<Point> samples;
+        samples.reserve(path.polyline.size());
+        samples.push_back(path.polyline.points.front());
+        for (size_t i = 1; i < path.polyline.size(); ++i)
+        {
+            const Point &from = path.polyline.points[i - 1];
+            const Point &to = path.polyline.points[i];
+            const double length_mm =
+                unscale<double>(std::hypot(double(to.x() - from.x()), double(to.y() - from.y())));
+            const int steps = std::max(1, int(std::ceil(length_mm)));
+            for (int step = 1; step <= steps; ++step)
+            {
+                if (step == steps)
+                    samples.push_back(to);
+                else
+                    samples.emplace_back(
+                        coord_t(std::llround(double(from.x()) + double(to.x() - from.x()) * step / steps)),
+                        coord_t(std::llround(double(from.y()) + double(to.y() - from.y()) * step / steps)));
+            }
+        }
+
+        struct Run
+        {
+            Polyline polyline;
+            int stripe{-1};
+        };
+        std::vector<Run> pieces;
+        Run current;
+        current.stripe = stripe_at(samples.front());
+        current.polyline.points.push_back(samples.front());
+        for (size_t i = 1; i < samples.size(); ++i)
+        {
+            const int stripe = stripe_at(samples[i]);
+            if (stripe != current.stripe)
+            {
+                current.polyline.points.push_back(samples[i]);
+                if (current.polyline.size() >= 2 && current.stripe >= 0)
+                    pieces.push_back(std::move(current));
+                current = Run{};
+                current.stripe = stripe;
+                current.polyline.points.push_back(samples[i]);
+            }
+            else
+                current.polyline.points.push_back(samples[i]);
+        }
+        if (current.polyline.size() >= 2 && current.stripe >= 0)
+            pieces.push_back(std::move(current));
+
+        for (Run &run : pieces)
+        {
+            const Layer::ColorMixTopStripe &stripe = *stripes[size_t(run.stripe)];
+            Layer::CoexPartnerWall wall;
+            wall.polyline = std::move(run.polyline);
+            wall.width = path.width();
+            wall.height = path.height();
+            wall.mm3_per_mm = path.mm3_per_mm();
+            wall.home_filament = home_filament;
+            wall.slice_index = slice_index;
+            wall.island_index = island_index;
+            wall.tools = stripe.pattern;
+            wall.coex_count = stripe.coex_count;
+            wall.rotation_deg = stripe.coex_rotation_deg;
+            layer.coex_partner_walls.push_back(std::move(wall));
+        }
+    };
+
+    std::function<void(const ExtrusionEntity *, int, int, int)> walk =
+        [&](const ExtrusionEntity *entity, int home_filament, int slice_index, int island_index)
+    {
+        if (entity == nullptr)
+            return;
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+        {
+            for (const ExtrusionEntity *child : collection->entities)
+                walk(child, home_filament, slice_index, island_index);
+            return;
+        }
+        if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
+        {
+            for (const ExtrusionPath &path : loop->paths)
+                take_path(path, home_filament, slice_index, island_index);
+            return;
+        }
+        if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(entity))
+        {
+            for (const ExtrusionPath &path : multi->paths)
+                take_path(path, home_filament, slice_index, island_index);
+            return;
+        }
+        if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity))
+            take_path(*path, home_filament, slice_index, island_index);
+    };
+
+    for (size_t slice_index = 0; slice_index < layer.lslices_ex.size(); ++slice_index)
+    {
+        const LayerSlice &lslice = layer.lslices_ex[slice_index];
+        for (size_t island_index = 0; island_index < lslice.islands.size(); ++island_index)
+        {
+            const LayerIsland &island = lslice.islands[island_index];
+            if (island.perimeters.empty())
+                continue;
+            LayerRegion *home = layer.get_region(int(island.perimeters.region()));
+            const int home_filament = home->region().config().perimeter_extruder.value - 1;
+            for (uint32_t entity_index : island.perimeters)
+            {
+                if (entity_index >= home->perimeters().entities.size())
+                    continue;
+                walk(home->perimeters().entities[entity_index], home_filament, int(slice_index), int(island_index));
+            }
+        }
+    }
+}
+
 } // namespace
+
+void Layer::emit_coex_partner_walls()
+{
+    if (coex_partner_walls.empty())
+        return;
+
+    const ConfigOptionFloats &nozzles = object()->print()->config().nozzle_diameter;
+    struct Bucket
+    {
+        int slice{0};
+        int island{0};
+        int region{0};
+        ExtrusionEntityCollection *collection{nullptr};
+    };
+    std::vector<Bucket> buckets;
+
+    auto bucket_for = [&](int slice, int island, int region) -> ExtrusionEntityCollection *
+    {
+        for (const Bucket &bucket : buckets)
+            if (bucket.slice == slice && bucket.island == island && bucket.region == region)
+                return bucket.collection;
+        auto *collection = new ExtrusionEntityCollection();
+        collection->no_sort = true;
+        LayerRegion *dest = get_region(region);
+        const uint32_t begin = uint32_t(dest->m_fills.entities.size());
+        dest->m_fills.entities.push_back(collection);
+        if (slice >= 0 && size_t(slice) < lslices_ex.size())
+        {
+            LayerSlice &lslice = lslices_ex[size_t(slice)];
+            if (island >= 0 && size_t(island) < lslice.islands.size())
+                lslice.islands[size_t(island)].add_fill_range(
+                    LayerExtrusionRange{uint32_t(region), {begin, begin + 1}});
+        }
+        buckets.push_back(Bucket{slice, island, region, collection});
+        return collection;
+    };
+
+    for (const CoexPartnerWall &src : coex_partner_walls)
+    {
+        const int tool = coex_layer_tool(src.tools, src.coex_count, id());
+        if (tool < 0 || tool == src.home_filament)
+            continue;
+        const bool reference = tool == src.tools.front();
+        const float nozzle_mm = nozzles.values.empty()
+                                    ? 0.4f
+                                    : float(nozzles.values[size_t(std::min(tool, int(nozzles.values.size()) - 1))]);
+        const Vec2d shift = reference ? Vec2d::Zero()
+                                      : coex_wall_shift_mm(tool, src.tools, src.coex_count, src.rotation_deg, nozzle_mm);
+        if (!reference && shift.squaredNorm() < 1e-8)
+            continue;
+        int dest = -1;
+        for (size_t i = 0; i < m_regions.size(); ++i)
+        {
+            if (m_regions[i]->region().config().perimeter_extruder.value == tool + 1)
+            {
+                dest = int(i);
+                break;
+            }
+        }
+        if (dest < 0)
+            continue;
+        Polyline polyline = src.polyline;
+        nudge_outer_wall(polyline, shift, lslices);
+        if (polyline.size() < 2)
+            continue;
+        bucket_for(src.slice_index, src.island_index, dest)
+            ->entities.push_back(new ExtrusionPath(
+                std::move(polyline),
+                ExtrusionAttributes(ExtrusionRole::ExternalPerimeter,
+                                    ExtrusionFlow(src.mm3_per_mm, src.width, src.height))));
+    }
+    coex_partner_walls.clear();
+}
 
 void Layer::make_perimeters()
 {
@@ -1282,23 +1724,54 @@ void Layer::make_perimeters()
     if (!this->color_mix_top_stripes.empty())
     {
         std::vector<ColorMixOverhangJob> jobs;
+        std::vector<const ColorMixTopStripe *> coex_stripes;
         jobs.reserve(this->color_mix_top_stripes.size());
         for (const ColorMixTopStripe &stripe : this->color_mix_top_stripes)
-            if (stripe.pattern.size() >= 2 && !stripe.area.empty())
-                jobs.push_back(ColorMixOverhangJob{&stripe.area, &stripe.pattern});
-        if (!jobs.empty())
         {
-            const ConfigOptionFloats &nozzles = this->object()->print()->config().nozzle_diameter;
-            for (LayerRegion *region : m_regions)
-            {
-                const int filament = region->region().config().perimeter_extruder.value - 1;
-                if (filament < 0 || region->m_perimeters.empty())
-                    continue;
-                const float nozzle_mm = nozzles.values.empty()
-                                            ? 0.4f
-                                            : float(nozzles.values[size_t(std::min(filament, int(nozzles.values.size()) - 1))]);
+            if (stripe.area.empty() || stripe.pattern.size() < 2)
+                continue;
+            if (stripe.coex_count >= 2)
+                coex_stripes.push_back(&stripe);
+            else
+                jobs.push_back(ColorMixOverhangJob{&stripe.area, &stripe.pattern});
+        }
+        if (!coex_stripes.empty())
+            capture_coex_partner_walls(*this, coex_stripes);
+        const ConfigOptionFloats &nozzles = this->object()->print()->config().nozzle_diameter;
+        for (LayerRegion *region : m_regions)
+        {
+            const int filament = region->region().config().perimeter_extruder.value - 1;
+            if (filament < 0 || region->m_perimeters.empty())
+                continue;
+            const float nozzle_mm = nozzles.values.empty()
+                                        ? 0.4f
+                                        : float(nozzles.values[size_t(std::min(filament, int(nozzles.values.size()) - 1))]);
+            if (!jobs.empty())
                 apply_color_mix_overhang_collection(region->m_perimeters, jobs, filament, nozzle_mm, this->lslices);
+            std::vector<CoexShiftJob> shifts;
+            for (const ColorMixTopStripe *stripe : coex_stripes)
+            {
+                const int active = coex_layer_tool(stripe->pattern, stripe->coex_count, this->id());
+                if (active < 0)
+                    continue;
+                if (filament == active)
+                {
+                    // The first tool is the reference and stays on the original wall.
+                    // The other tool is offset, and only on the layers it prints.
+                    if (active == stripe->pattern.front())
+                        continue;
+                    const Vec2d shift_mm = coex_wall_shift_mm(active, stripe->pattern, stripe->coex_count,
+                                                              stripe->coex_rotation_deg, nozzle_mm);
+                    if (shift_mm.squaredNorm() < 1e-8)
+                        continue;
+                    shifts.push_back(CoexShiftJob{&stripe->area, shift_mm, false});
+                }
+                else
+                    // This layer's outer wall belongs to the other color. Drop it here so it
+                    // is printed once, by that color.
+                    shifts.push_back(CoexShiftJob{&stripe->area, Vec2d::Zero(), true});
             }
+            apply_coex_wall_shift_collection(region->m_perimeters, shifts, this->lslices);
         }
     }
 

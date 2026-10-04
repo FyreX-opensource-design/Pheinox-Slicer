@@ -152,6 +152,12 @@ protected:
     virtual TriangleStateType get_right_button_state_type() const { return TriangleStateType::BLOCKER; }
 
     float m_cursor_radius = 1.0f;
+    // Negative until a stylus reports pressure. The brush slider stays the maximum.
+    float m_stylus_pressure{-1.f};
+    // Physical eraser end of a stylus. Filament painting uses this to restore the
+    // volume's own filament instead of the second brush color.
+    bool m_stylus_eraser{false};
+    float effective_brush_radius() const;
     static constexpr float CursorRadiusMin = 0.05f; // cannot be zero
     static constexpr float CursorRadiusMax = 3.0f;
     static constexpr float CursorRadiusStep = 0.05f;
@@ -235,6 +241,11 @@ protected:
 
     void update_raycast_cache(const Vec2d &mouse_position, const Camera &camera,
                               const std::vector<Transform3d> &trafo_matrices) const;
+
+    // Subclasses that paint outside the base stroke (a shaped brush tip) still
+    // have to record which button is held so mouse-up snapshots the right color.
+    Button pressed_button() const { return m_button_down; }
+    void remember_pressed_button(Button button) { m_button_down = button; }
 
 private:
     std::vector<std::vector<ProjectedMousePosition>> get_projected_mouse_positions(

@@ -18,7 +18,9 @@
 #include "libslic3r/enum_bitmask.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 
+#include <algorithm>
 #include <regex>
+#include <sstream>
 #include <wx/numformatter.h>
 #include <wx/bookctrl.h> // IWYU pragma: keep
 #include <wx/tooltip.h>  // IWYU pragma: keep
@@ -498,6 +500,53 @@ void Field::get_value_by_opt_type(wxString &str, const bool check_value /* = tru
         m_value = into_u8(str);
         break;
     }
+    case coPoints:
+        if (m_opt.opt_key == "feature_purge_approach")
+        {
+            std::string text = into_u8(str);
+            const auto first = text.find_first_not_of(" \t\r\n");
+            const auto last = text.find_last_not_of(" \t\r\n");
+            text = (first == std::string::npos) ? std::string() : text.substr(first, last - first + 1);
+            bool ok = true;
+            if (!text.empty())
+            {
+                std::replace(text.begin(), text.end(), 'X', 'x');
+                std::istringstream is(text);
+                std::string token;
+                while (ok && std::getline(is, token, ','))
+                {
+                    const auto t0 = token.find_first_not_of(" \t");
+                    const auto t1 = token.find_last_not_of(" \t");
+                    token = (t0 == std::string::npos) ? std::string() : token.substr(t0, t1 - t0 + 1);
+                    const auto xpos = token.find('x');
+                    ok = !token.empty() && xpos != std::string::npos && xpos > 0 && xpos + 1 < token.size();
+                }
+            }
+            if (!ok)
+            {
+                if (check_value)
+                {
+                    show_error(m_parent, _L("Invalid purge approach. Use XxY pairs separated by commas, for example "
+                                            "10x200,10x220. Leave the field empty to travel straight to the bucket."));
+                    if (!m_value.empty())
+                        set_value(from_u8(boost::any_cast<std::string>(m_value)), true);
+                }
+                else
+                    m_value.clear();
+                break;
+            }
+            ConfigOptionPoints pts;
+            pts.deserialize(text);
+            text = pts.serialize();
+            if (text != into_u8(str))
+            {
+                str = from_u8(text);
+                if (check_value)
+                    set_value(str, false);
+            }
+            m_value = text;
+        }
+        break;
 
     default:
         break;
@@ -577,6 +626,10 @@ void TextCtrl::BUILD()
     }
     case coString:
         text_value = m_opt.get_default_value<ConfigOptionString>()->value;
+        break;
+    case coPoints:
+        if (m_opt.opt_key == "feature_purge_approach" && m_opt.default_value)
+            text_value = from_u8(m_opt.default_value->serialize());
         break;
     case coStrings:
     {
@@ -733,6 +786,8 @@ bool TextCtrl::value_was_changed()
     case coFloatsOrPercents:
         return boost::any_cast<std::string>(m_value) != boost::any_cast<std::string>(val);
     case coPoints:
+        if (m_opt.opt_key == "feature_purge_approach")
+            return boost::any_cast<std::string>(m_value) != boost::any_cast<std::string>(val);
         return boost::any_cast<std::vector<Vec2d>>(m_value) != boost::any_cast<std::vector<Vec2d>>(val);
     default:
         return true;
@@ -1919,7 +1974,17 @@ void PointCtrl::BUILD()
 
     const wxSize field_size(4 * m_em_unit, -1);
 
-    auto default_pt = m_opt.get_default_value<ConfigOptionPoints>()->values.at(0);
+    Vec2d default_pt(Vec2d::Zero());
+    if (m_opt.type == coPoint)
+    {
+        if (const auto *pt = m_opt.get_default_value<ConfigOptionPoint>())
+            default_pt = pt->value;
+    }
+    else if (const auto *pts = m_opt.get_default_value<ConfigOptionPoints>())
+    {
+        if (!pts->values.empty())
+            default_pt = pts->values.front();
+    }
     double val = default_pt(0);
     wxString X = val - int(val) == 0 ? wxString::Format(_T("%i"), int(val))
                                      : wxNumberFormatter::ToString(val, 2, wxNumberFormatter::Style_None);
