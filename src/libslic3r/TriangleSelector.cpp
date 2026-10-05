@@ -1301,10 +1301,40 @@ void TriangleSelector::set_facet(int facet_idx, TriangleStateType state)
     m_triangles[facet_idx].set_state(state);
 }
 
+std::vector<unsigned char> TriangleSelector::seed_fill_original_facets() const
+{
+    std::vector<unsigned char> mask(size_t(std::max(m_orig_size_indices, 0)), 0);
+    for (const Triangle &tr : m_triangles)
+    {
+        if (!tr.valid() || tr.is_split() || !tr.is_selected_by_seed_fill())
+            continue;
+        if (tr.source_triangle >= 0 && tr.source_triangle < int(mask.size()))
+            mask[size_t(tr.source_triangle)] = 1;
+    }
+    return mask;
+}
+
+void TriangleSelector::append_seed_fill_points(std::vector<std::pair<int, Vec3f>> &out) const
+{
+    for (const Triangle &tr : m_triangles)
+    {
+        if (!tr.valid() || tr.is_split() || !tr.is_selected_by_seed_fill())
+            continue;
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int vertex = tr.verts_idxs[corner];
+            if (vertex < 0 || vertex >= int(m_vertices.size()))
+                continue;
+            out.emplace_back(tr.source_triangle, m_vertices[size_t(vertex)].v);
+        }
+    }
+}
+
 int TriangleSelector::paint_planar_image(
     const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
-    const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current)> &sample,
-    const std::vector<unsigned char> *source_facets)
+    const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current,
+                                                          int source_triangle)> &sample,
+    const std::vector<unsigned char> *source_facets, bool seed_fill_only)
 {
     if (!sample || face_outward.squaredNorm() < 1e-16 || !(max_edge_world_mm > 0.f) || m_orig_size_indices <= 0)
         return 0;
@@ -1423,6 +1453,9 @@ int TriangleSelector::paint_planar_image(
             return;
         }
 
+        if (seed_fill_only && !tr.is_selected_by_seed_fill())
+            return;
+
         const Vec3d p0 = world_point(tr.verts_idxs[0]);
         const Vec3d p1 = world_point(tr.verts_idxs[1]);
         const Vec3d p2 = world_point(tr.verts_idxs[2]);
@@ -1436,13 +1469,17 @@ int TriangleSelector::paint_planar_image(
             for (int child = 0; child <= children; ++child)
             {
                 const int child_idx = m_triangles[facet_idx].children[child];
+                if (seed_fill_only && child_idx >= 0 && child_idx < int(m_triangles.size()) &&
+                    !m_triangles[child_idx].is_split())
+                    m_triangles[child_idx].select_by_seed_fill();
                 const Vec3i child_neighbors_idx = child_neighbors(m_triangles[facet_idx], neighbors, child);
                 paint(child_idx, child_neighbors_idx, depth + 1);
             }
             return;
         }
 
-        const std::optional<TriangleStateType> state = sample((p0 + p1 + p2) / 3.0, tr.get_state());
+        const std::optional<TriangleStateType> state =
+            sample((p0 + p1 + p2) / 3.0, tr.get_state(), tr.source_triangle);
         if (!state)
             return;
         m_triangles[facet_idx].set_state(*state);

@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <unordered_map>
 
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -309,7 +311,7 @@ bool GLGizmoColorMixing::stamp_paint_brush(const Vec2d &mouse_position, bool sec
     {
         assigned += m_triangle_selectors[size_t(mesh_id)]->paint_planar_image(
             trafo, toward_camera, 0.15f, std::max(radius / 8.f, 0.05f),
-            [&](const Vec3d &world_point, TriangleStateType current) -> std::optional<TriangleStateType>
+            [&](const Vec3d &world_point, TriangleStateType current, int) -> std::optional<TriangleStateType>
             {
                 const Vec2d screen = brush_world_to_screen(camera, world_point);
                 const float u = float((screen.x() - dab.x()) / double(radius_px * 2.f) + 0.5);
@@ -418,11 +420,518 @@ bool GLGizmoColorMixing::load_mapped_image()
     return true;
 }
 
-void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
+// Lay the clicked patch flat so one picture continues across faces that are not coplanar.
+// The clicked face keeps the camera's orientation. Each neighbor is hinged across the
+// shared edge, so a corner does not squash the picture into a line.
+struct ImageChart
+{
+    std::vector<Vec2d> vertex_uv;
+    std::vector<char> placed;
+    double umin{0};
+    double umax{0};
+    double vmin{0};
+    double vmax{0};
+    bool ok{false};
+};
+
+static Vec3d image_chart_world(const Transform3d &trafo, const indexed_triangle_set &its, int vertex)
+{
+    return trafo * its.vertices[size_t(vertex)].cast<double>();
+}
+
+static void image_chart_place_third(ImageChart &chart, const Transform3d &trafo, const indexed_triangle_set &its,
+                                    int edge_a, int edge_b, int newbie, int parent_other)
+{
+    const Vec3d a = image_chart_world(trafo, its, edge_a);
+    const Vec3d b = image_chart_world(trafo, its, edge_b);
+    const Vec3d c = image_chart_world(trafo, its, newbie);
+    const Vec2d uv_a = chart.vertex_uv[size_t(edge_a)];
+    const Vec2d uv_b = chart.vertex_uv[size_t(edge_b)];
+    const double ab = (b - a).norm();
+    const Vec2d ab_uv = uv_b - uv_a;
+    const double ab_uv_len = ab_uv.norm();
+    if (!(ab > 1e-9) || !(ab_uv_len > 1e-9))
+    {
+        chart.vertex_uv[size_t(newbie)] = uv_a;
+        chart.placed[size_t(newbie)] = 1;
+        return;
+    }
+    const double ac = (c - a).norm();
+    const double bc = (c - b).norm();
+    const double along_3d = (ac * ac + ab * ab - bc * bc) / (2.0 * ab);
+    const double height_sq = std::max(0.0, ac * ac - along_3d * along_3d);
+    const double height = std::sqrt(height_sq);
+    const double scale = ab_uv_len / ab;
+    const Vec2d along = ab_uv / ab_uv_len;
+    const Vec2d perp(-along.y(), along.x());
+    const Vec2d foot = uv_a + along * (along_3d * scale);
+    const double parent_side = perp.dot(chart.vertex_uv[size_t(parent_other)] - uv_a);
+    const double sign = parent_side > 0.0 ? -1.0 : 1.0;
+    chart.vertex_uv[size_t(newbie)] = foot + perp * (sign * height * scale);
+    chart.placed[size_t(newbie)] = 1;
+}
+
+static ImageChart unfold_image_chart(const indexed_triangle_set &its, const Transform3d &trafo,
+                                     const std::vector<unsigned char> &facet_mask, const std::vector<Vec3i> &neighbors,
+                                     int seed_facet, const Vec3d &right, const Vec3d &up)
+{
+    ImageChart chart;
+    if (seed_facet < 0 || seed_facet >= int(its.indices.size()) || facet_mask.size() != its.indices.size())
+        return chart;
+    chart.vertex_uv.assign(its.vertices.size(), Vec2d::Zero());
+    chart.placed.assign(its.vertices.size(), 0);
+    const Vec3i &seed = its.indices[size_t(seed_facet)];
+    for (int corner = 0; corner < 3; ++corner)
+    {
+        const Vec3d world = image_chart_world(trafo, its, seed[corner]);
+        chart.vertex_uv[size_t(seed[corner])] = Vec2d(world.dot(right), world.dot(up));
+        chart.placed[size_t(seed[corner])] = 1;
+    }
+
+    std::vector<int> queue;
+    std::vector<char> seen(its.indices.size(), 0);
+    queue.push_back(seed_facet);
+    seen[size_t(seed_facet)] = 1;
+    for (size_t head = 0; head < queue.size(); ++head)
+    {
+        const int face = queue[head];
+        const Vec3i &tri = its.indices[size_t(face)];
+        if (!chart.placed[size_t(tri[0])] || !chart.placed[size_t(tri[1])] || !chart.placed[size_t(tri[2])])
+            continue;
+        if (face < 0 || face >= int(neighbors.size()))
+            continue;
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int next = neighbors[size_t(face)][corner];
+            if (next < 0 || next >= int(facet_mask.size()) || facet_mask[size_t(next)] == 0 || seen[size_t(next)])
+                continue;
+            const Vec3i &neighbor = its.indices[size_t(next)];
+            int newbie = -1;
+            int shared_a = -1;
+            int shared_b = -1;
+            int shared_count = 0;
+            for (int c = 0; c < 3; ++c)
+            {
+                const int vertex = neighbor[c];
+                if (vertex == tri[0] || vertex == tri[1] || vertex == tri[2])
+                {
+                    if (shared_count == 0)
+                        shared_a = vertex;
+                    else
+                        shared_b = vertex;
+                    ++shared_count;
+                }
+                else
+                    newbie = vertex;
+            }
+            int parent_other = -1;
+            for (int c = 0; c < 3; ++c)
+            {
+                const int vertex = tri[c];
+                if (vertex != neighbor[0] && vertex != neighbor[1] && vertex != neighbor[2])
+                    parent_other = vertex;
+            }
+            if (newbie < 0 || shared_a < 0 || shared_b < 0 || parent_other < 0 || shared_count != 2)
+                continue;
+            if (!chart.placed[size_t(newbie)])
+                image_chart_place_third(chart, trafo, its, shared_a, shared_b, newbie, parent_other);
+            seen[size_t(next)] = 1;
+            queue.push_back(next);
+        }
+    }
+
+    chart.umin = std::numeric_limits<double>::infinity();
+    chart.umax = -chart.umin;
+    chart.vmin = chart.umin;
+    chart.vmax = chart.umax;
+    for (size_t face = 0; face < its.indices.size(); ++face)
+    {
+        if (facet_mask[face] == 0)
+            continue;
+        const Vec3i &tri = its.indices[face];
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int vertex = tri[corner];
+            if (!chart.placed[size_t(vertex)])
+                continue;
+            const Vec2d &uv = chart.vertex_uv[size_t(vertex)];
+            chart.umin = std::min(chart.umin, uv.x());
+            chart.umax = std::max(chart.umax, uv.x());
+            chart.vmin = std::min(chart.vmin, uv.y());
+            chart.vmax = std::max(chart.vmax, uv.y());
+        }
+    }
+    chart.ok = chart.umax - chart.umin > 1e-4 && chart.vmax - chart.vmin > 1e-4;
+    return chart;
+}
+
+static bool image_chart_barycentric(const Vec3d &point, const Vec3d &v0, const Vec3d &v1, const Vec3d &v2, double &b0,
+                                    double &b1, double &b2)
+{
+    const Vec3d normal = (v1 - v0).cross(v2 - v0);
+    const double denom = normal.squaredNorm();
+    if (!(denom > 1e-18))
+        return false;
+    b0 = (v1 - point).cross(v2 - point).dot(normal) / denom;
+    b1 = (v2 - point).cross(v0 - point).dot(normal) / denom;
+    b2 = 1.0 - b0 - b1;
+    const double sum = b0 + b1 + b2;
+    if (!(sum > 1e-8))
+        return false;
+    b0 = std::clamp(b0, 0.0, 1.0);
+    b1 = std::clamp(b1, 0.0, 1.0);
+    b2 = std::clamp(b2, 0.0, 1.0);
+    const double clamped = b0 + b1 + b2;
+    if (!(clamped > 1e-8))
+        return false;
+    b0 /= clamped;
+    b1 /= clamped;
+    b2 /= clamped;
+    return true;
+}
+
+struct BumpDisplacement
+{
+    indexed_triangle_set mesh;
+    int moved{0};
+};
+
+static uint64_t bump_edge_key(int a, int b)
+{
+    const uint32_t lo = uint32_t(std::min(a, b));
+    const uint32_t hi = uint32_t(std::max(a, b));
+    return (uint64_t(lo) << 32) | uint64_t(hi);
+}
+
+static float bump_sample_height(int width, int height, const unsigned char *rgb, const unsigned char *alpha, double u,
+                                double v, float amplitude, bool symmetric, bool invert)
+{
+    if (!(u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0) || width < 1 || height < 1 || rgb == nullptr)
+        return 0.f;
+    const int x = std::clamp(int(std::lround(u * (width - 1))), 0, width - 1);
+    const int y = std::clamp(int(std::lround((1.0 - v) * (height - 1))), 0, height - 1);
+    const size_t index = size_t(y) * size_t(width) + size_t(x);
+    if (alpha != nullptr && alpha[index] < 128)
+        return 0.f;
+    const unsigned char *px = rgb + index * 3;
+    const float luma = (0.2126f * float(px[0]) + 0.7152f * float(px[1]) + 0.0722f * float(px[2])) / 255.f;
+    float offset = symmetric ? (luma - 0.5f) * 2.f * amplitude : luma * amplitude;
+    if (invert)
+        offset = -offset;
+    return offset;
+}
+
+// Subdivide the chosen faces until edges are about `detail_mm`, then move interior
+// vertices along the surface normal by the picture's brightness. Vertices that also
+// belong to an untouched face stay put, so the part stays watertight.
+static std::optional<BumpDisplacement> displace_bump_map(const indexed_triangle_set &its, const Transform3d &trafo,
+                                                         const std::vector<unsigned char> &facet_mask, bool use_mask,
+                                                         const ImageChart *chart, const Vec3d &face_outward,
+                                                         const Vec3d &right, const Vec3d &up, double umin, double umax,
+                                                         double vmin, double vmax, float min_dot, float detail_mm,
+                                                         float amplitude_mm, bool symmetric, bool invert, int image_width,
+                                                         int image_height, const unsigned char *rgb,
+                                                         const unsigned char *alpha)
+{
+    if (its.indices.empty() || std::abs(trafo.linear().determinant()) < 1e-18 || !(amplitude_mm > 0.f))
+        return std::nullopt;
+    const double u_span = umax - umin;
+    const double v_span = vmax - vmin;
+    if (!(u_span > 1e-4 && v_span > 1e-4))
+        return std::nullopt;
+
+    const Eigen::Matrix3d normal_matrix = trafo.linear().inverse().transpose();
+    const Vec3d face = face_outward.squaredNorm() > 1e-16 ? face_outward.normalized() : Vec3d::UnitZ();
+    const std::vector<Vec3f> mesh_normals = its_face_normals(its);
+    std::vector<char> textured(its.indices.size(), 0);
+    std::vector<Vec3d> world_normals(its.indices.size(), Vec3d::Zero());
+    int textured_count = 0;
+    double longest_edge = 0.0;
+    for (size_t facet = 0; facet < its.indices.size(); ++facet)
+    {
+        Vec3d normal = normal_matrix * mesh_normals[facet].cast<double>();
+        const double length = normal.norm();
+        if (!(length > 1e-12))
+            continue;
+        normal /= length;
+        const bool chosen = use_mask ? (facet < facet_mask.size() && facet_mask[facet] != 0)
+                                     : normal.dot(face) >= double(min_dot);
+        if (!chosen)
+            continue;
+        textured[facet] = 1;
+        world_normals[facet] = normal;
+        ++textured_count;
+        const Vec3i &tri = its.indices[facet];
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const Vec3d edge = trafo.linear() * (its.vertices[size_t(tri[(corner + 1) % 3])] -
+                                                  its.vertices[size_t(tri[corner])])
+                                                 .cast<double>();
+            longest_edge = std::max(longest_edge, edge.norm());
+        }
+    }
+    if (textured_count == 0)
+        return std::nullopt;
+
+    const double requested = std::max(double(detail_mm), 0.05);
+    auto triangles_at = [&](double limit) -> double
+    {
+        double total = 0.0;
+        for (size_t facet = 0; facet < its.indices.size(); ++facet)
+        {
+            if (!textured[facet])
+                continue;
+            const Vec3i &tri = its.indices[facet];
+            double edge = 0.0;
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const Vec3d side = trafo.linear() * (its.vertices[size_t(tri[(corner + 1) % 3])] -
+                                                      its.vertices[size_t(tri[corner])])
+                                                     .cast<double>();
+                edge = std::max(edge, side.norm());
+            }
+            int depth = 0;
+            while (edge > limit && depth < 8)
+            {
+                edge *= 0.5;
+                ++depth;
+            }
+            double count = 1.0;
+            for (int i = 0; i < depth; ++i)
+                count *= 4.0;
+            total += count;
+            if (total > 200000.0)
+                return total;
+        }
+        return total;
+    };
+    double limit = requested;
+    if (triangles_at(limit) > 200000.0 && longest_edge > limit)
+    {
+        double lo = limit;
+        double hi = longest_edge;
+        for (int step = 0; step < 24; ++step)
+        {
+            const double mid = 0.5 * (lo + hi);
+            if (triangles_at(mid) > 200000.0)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        limit = hi;
+    }
+    const double limit_sq = limit * limit;
+
+    struct BumpTri
+    {
+        int v[3];
+        int source;
+    };
+    std::vector<Vec3f> vertices = its.vertices;
+    std::vector<BumpTri> tris;
+    tris.reserve(its.indices.size());
+    for (size_t facet = 0; facet < its.indices.size(); ++facet)
+    {
+        const Vec3i &tri = its.indices[facet];
+        tris.push_back(BumpTri{{int(tri[0]), int(tri[1]), int(tri[2])}, int(facet)});
+    }
+
+    const auto world_edge_sq = [&](int a, int b) -> double
+    {
+        const Vec3d edge = trafo.linear() * (vertices[size_t(b)] - vertices[size_t(a)]).cast<double>();
+        return edge.squaredNorm();
+    };
+
+    for (int pass = 0; pass < 8 && tris.size() < 800000; ++pass)
+    {
+        std::unordered_map<uint64_t, int> midpoints;
+        bool any = false;
+        for (const BumpTri &tri : tris)
+        {
+            if (tri.source < 0 || tri.source >= int(textured.size()) || !textured[size_t(tri.source)])
+                continue;
+            for (int edge = 0; edge < 3; ++edge)
+            {
+                const int a = tri.v[edge];
+                const int b = tri.v[(edge + 1) % 3];
+                if (world_edge_sq(a, b) <= limit_sq)
+                    continue;
+                const uint64_t key = bump_edge_key(a, b);
+                if (midpoints.find(key) != midpoints.end())
+                    continue;
+                midpoints.emplace(key, int(vertices.size()));
+                vertices.push_back((vertices[size_t(a)] + vertices[size_t(b)]) * 0.5f);
+                any = true;
+            }
+        }
+        if (!any)
+            break;
+
+        std::vector<BumpTri> next;
+        next.reserve(tris.size() * 2);
+        const auto emit = [&](int a, int b, int c, int source)
+        { next.push_back(BumpTri{{a, b, c}, source}); };
+        for (const BumpTri &tri : tris)
+        {
+            int mid[3];
+            int splits = 0;
+            for (int edge = 0; edge < 3; ++edge)
+            {
+                const auto found = midpoints.find(bump_edge_key(tri.v[edge], tri.v[(edge + 1) % 3]));
+                mid[edge] = found == midpoints.end() ? -1 : found->second;
+                if (mid[edge] >= 0)
+                    ++splits;
+            }
+            if (splits == 0)
+            {
+                next.push_back(tri);
+                continue;
+            }
+            if (splits == 3)
+            {
+                emit(tri.v[0], mid[0], mid[2], tri.source);
+                emit(mid[0], tri.v[1], mid[1], tri.source);
+                emit(mid[1], tri.v[2], mid[2], tri.source);
+                emit(mid[0], mid[1], mid[2], tri.source);
+                continue;
+            }
+            if (splits == 1)
+            {
+                const int edge = mid[0] >= 0 ? 0 : (mid[1] >= 0 ? 1 : 2);
+                const int s = (edge + 2) % 3;
+                const int s1 = (s + 1) % 3;
+                const int s2 = (s + 2) % 3;
+                emit(tri.v[s], tri.v[s1], mid[edge], tri.source);
+                emit(mid[edge], tri.v[s2], tri.v[s], tri.source);
+                continue;
+            }
+            int corner = 0;
+            for (int vertex = 0; vertex < 3; ++vertex)
+            {
+                if (mid[vertex] >= 0 && mid[(vertex + 2) % 3] >= 0)
+                    corner = vertex;
+            }
+            const int s1 = (corner + 1) % 3;
+            const int s2 = (corner + 2) % 3;
+            emit(tri.v[corner], mid[corner], mid[s2], tri.source);
+            emit(mid[corner], tri.v[s1], mid[s2], tri.source);
+            emit(tri.v[s1], tri.v[s2], mid[s2], tri.source);
+        }
+        tris.swap(next);
+    }
+
+    const size_t vertex_count = vertices.size();
+    std::vector<char> boundary(vertex_count, 0);
+    std::vector<Vec3d> normal_acc(vertex_count, Vec3d::Zero());
+    std::vector<std::array<int, 3>> sources(vertex_count, std::array<int, 3>{-1, -1, -1});
+    for (const BumpTri &tri : tris)
+    {
+        const bool tex = tri.source >= 0 && tri.source < int(textured.size()) && textured[size_t(tri.source)] != 0;
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int vertex = tri.v[corner];
+            if (vertex < 0 || vertex >= int(vertex_count))
+                continue;
+            if (!tex)
+            {
+                boundary[size_t(vertex)] = 1;
+                continue;
+            }
+            std::array<int, 3> &slot = sources[size_t(vertex)];
+            bool seen = false;
+            int free = -1;
+            for (int k = 0; k < 3; ++k)
+            {
+                if (slot[k] == tri.source)
+                    seen = true;
+                else if (slot[k] < 0 && free < 0)
+                    free = k;
+            }
+            if (!seen && free >= 0)
+            {
+                slot[free] = tri.source;
+                normal_acc[size_t(vertex)] += world_normals[size_t(tri.source)];
+            }
+        }
+    }
+
+    const Transform3d inverse = trafo.inverse();
+    const auto uv_of = [&](int vertex, int source, double &u, double &v) -> bool
+    {
+        if (source < 0 || source >= int(its.indices.size()))
+            return false;
+        const Vec3i &tri = its.indices[size_t(source)];
+        const Vec3d point = vertices[size_t(vertex)].cast<double>();
+        if (chart != nullptr)
+        {
+            if (size_t(tri[0]) >= chart->placed.size() || size_t(tri[1]) >= chart->placed.size() ||
+                size_t(tri[2]) >= chart->placed.size() || !chart->placed[size_t(tri[0])] ||
+                !chart->placed[size_t(tri[1])] || !chart->placed[size_t(tri[2])])
+                return false;
+            const Vec3d a = its.vertices[size_t(tri[0])].cast<double>();
+            const Vec3d b = its.vertices[size_t(tri[1])].cast<double>();
+            const Vec3d c = its.vertices[size_t(tri[2])].cast<double>();
+            double b0 = 0.0, b1 = 0.0, b2 = 0.0;
+            if (!image_chart_barycentric(point, a, b, c, b0, b1, b2))
+                return false;
+            const Vec2d uv = chart->vertex_uv[size_t(tri[0])] * b0 + chart->vertex_uv[size_t(tri[1])] * b1 +
+                             chart->vertex_uv[size_t(tri[2])] * b2;
+            u = (uv.x() - umin) / u_span;
+            v = (uv.y() - vmin) / v_span;
+            return true;
+        }
+        const Vec3d world = trafo * point;
+        u = (world.dot(right) - umin) / u_span;
+        v = (world.dot(up) - vmin) / v_span;
+        return true;
+    };
+
+    BumpDisplacement result;
+    for (size_t vertex = 0; vertex < vertex_count; ++vertex)
+    {
+        if (boundary[vertex] || sources[vertex][0] < 0)
+            continue;
+        const Vec3d normal = normal_acc[vertex];
+        if (normal.squaredNorm() < 1e-12)
+            continue;
+        int samples = 0;
+        double u_sum = 0.0, v_sum = 0.0;
+        for (int slot = 0; slot < 3; ++slot)
+        {
+            double su = 0.0, sv = 0.0;
+            if (sources[vertex][slot] < 0 || !uv_of(int(vertex), sources[vertex][slot], su, sv))
+                continue;
+            u_sum += su;
+            v_sum += sv;
+            ++samples;
+        }
+        if (samples == 0)
+            continue;
+        const double u = u_sum / double(samples);
+        const double v = v_sum / double(samples);
+        const float height = bump_sample_height(image_width, image_height, rgb, alpha, u, v, amplitude_mm, symmetric,
+                                                 invert);
+        if (!(std::abs(height) > 1e-6f))
+            continue;
+        const Vec3d world = trafo * vertices[vertex].cast<double>();
+        const Vec3d moved = world + normal.normalized() * double(height);
+        vertices[vertex] = (inverse * moved).cast<float>();
+        ++result.moved;
+    }
+    if (result.moved == 0)
+        return std::nullopt;
+    result.mesh.vertices = std::move(vertices);
+    result.mesh.indices.reserve(tris.size());
+    for (const BumpTri &tri : tris)
+        result.mesh.indices.emplace_back(tri.v[0], tri.v[1], tri.v[2]);
+    return result;
+}
+
+void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet, const std::vector<unsigned char> *selection)
 {
     if (!m_mapped_image || m_triangle_selectors.empty())
         return;
-    if (m_palette.colors().empty())
+    if (!m_bump_surface && m_palette.colors().empty())
     {
         m_parent.get_notification_manager()->push_notification(
             _u8L("Load filaments before mapping an image. The picture is matched to those virtual colors."));
@@ -435,14 +944,18 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
     const MappedImage &image = *m_mapped_image;
     // Each pixel keeps the virtual color it matched, including 2-way and 3-way mixes.
     // The paint preview shows that blend. Slicing still lays down the mix's filaments.
-    std::vector<int> quantized(size_t(image.width) * size_t(image.height), -1);
-    for (int i = 0; i < image.width * image.height; ++i)
+    std::vector<int> quantized;
+    if (!m_bump_surface)
     {
-        if (!image.alpha.empty() && image.alpha[size_t(i)] < 128)
-            continue;
-        const unsigned char *px = image.rgb.data() + size_t(i) * 3;
-        const uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
-        quantized[size_t(i)] = m_palette.find_best_match(rgb);
+        quantized.assign(size_t(image.width) * size_t(image.height), -1);
+        for (int i = 0; i < image.width * image.height; ++i)
+        {
+            if (!image.alpha.empty() && image.alpha[size_t(i)] < 128)
+                continue;
+            const unsigned char *px = image.rgb.data() + size_t(i) * 3;
+            const uint32_t rgb = (uint32_t(px[0]) << 16) | (uint32_t(px[1]) << 8) | uint32_t(px[2]);
+            quantized[size_t(i)] = m_palette.find_best_match(rgb);
+        }
     }
 
     int instance_idx = m_parent.get_selection().get_instance_idx();
@@ -460,6 +973,9 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
     std::vector<unsigned char> facet_mask;
     const bool place_on_face = mesh_id >= 0 && seed_facet >= 0;
     float min_dot = 0.35f;
+    ImageChart chart;
+    const indexed_triangle_set *chart_its = nullptr;
+    Transform3d chart_trafo = Transform3d::Identity();
     if (place_on_face)
     {
         const ModelVolume *target = nullptr;
@@ -520,31 +1036,132 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
         up.normalize();
         projection = {seed_normal, right, up};
 
-        // 35 degrees from the clicked face. A flat side is kept whole; a curve stays a local patch.
-        const double min_align = std::cos(35.0 * 0.017453292519943295);
         const std::vector<Vec3i> neighbors = its_face_neighbors(its);
-        facet_mask.assign(its.indices.size(), 0);
-        std::vector<int> pending;
-        pending.push_back(seed_facet);
-        facet_mask[size_t(seed_facet)] = 1;
-        while (!pending.empty())
+        const bool use_selection = selection != nullptr;
+        if (use_selection)
         {
-            const int face = pending.back();
-            pending.pop_back();
-            if (face < 0 || face >= int(neighbors.size()))
-                continue;
-            for (int corner = 0; corner < 3; ++corner)
+            if (selection->size() != its.indices.size())
             {
-                const int next = neighbors[size_t(face)][corner];
-                if (next < 0 || next >= int(facet_mask.size()) || facet_mask[size_t(next)] != 0)
+                m_parent.get_notification_manager()->push_notification(_u8L("Click a face of the model."));
+                return;
+            }
+            facet_mask = *selection;
+            if (seed_facet < 0 || seed_facet >= int(facet_mask.size()) || facet_mask[size_t(seed_facet)] == 0)
+            {
+                seed_facet = -1;
+                for (size_t face = 0; face < facet_mask.size(); ++face)
+                    if (facet_mask[face] != 0)
+                    {
+                        seed_facet = int(face);
+                        break;
+                    }
+            }
+            if (seed_facet < 0)
+            {
+                m_parent.get_notification_manager()->push_notification(
+                    _u8L("That fill did not select any triangles."));
+                return;
+            }
+            const Vec3d selected_normal = world_normal(size_t(seed_facet));
+            if (selected_normal.squaredNorm() > 0.5 && seed_facet != int(m_rr.facet))
+            {
+                Vec3d selected_right = camera_right - selected_normal * selected_normal.dot(camera_right);
+                if (selected_right.squaredNorm() < 1e-8)
+                {
+                    const Vec3d hint = std::abs(selected_normal.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX();
+                    selected_right = hint.cross(selected_normal);
+                }
+                selected_right.normalize();
+                Vec3d selected_up = camera_up - selected_normal * selected_normal.dot(camera_up);
+                selected_up -= selected_right * selected_up.dot(selected_right);
+                if (selected_up.squaredNorm() < 1e-8)
+                    selected_up = selected_normal.cross(selected_right);
+                selected_up.normalize();
+                right = selected_right;
+                up = selected_up;
+                projection = {selected_normal, right, up};
+            }
+            // The fill already chose the triangles. Do not drop one because it faces away.
+            min_dot = -2.f;
+        }
+        else
+        {
+            // Wrap is how far a neighbor may point away from the face that was clicked.
+            // 35° stays on one side. 90° includes the faces around a corner.
+            const double wrap_deg = double(std::clamp(m_image_wrap_deg, 20.f, 150.f));
+            const double wrap_cos = std::cos(wrap_deg * 0.017453292519943295);
+            const double min_align = wrap_cos - 1e-4;
+            facet_mask.assign(its.indices.size(), 0);
+            std::vector<int> pending;
+            pending.push_back(seed_facet);
+            facet_mask[size_t(seed_facet)] = 1;
+            while (!pending.empty())
+            {
+                const int face = pending.back();
+                pending.pop_back();
+                if (face < 0 || face >= int(neighbors.size()))
                     continue;
-                if (world_normal(size_t(next)).dot(seed_normal) < min_align)
+                for (int corner = 0; corner < 3; ++corner)
+                {
+                    const int next = neighbors[size_t(face)][corner];
+                    if (next < 0 || next >= int(facet_mask.size()) || facet_mask[size_t(next)] != 0)
+                        continue;
+                    if (world_normal(size_t(next)).dot(seed_normal) < min_align)
+                        continue;
+                    facet_mask[size_t(next)] = 1;
+                    pending.push_back(next);
+                }
+            }
+            min_dot = float(wrap_cos - 1e-3);
+        }
+        chart = unfold_image_chart(its, trafo, facet_mask, neighbors, seed_facet, right, up);
+        if (!chart.ok)
+        {
+            m_parent.get_notification_manager()->push_notification(_u8L("That face is too small to place the image on."));
+            return;
+        }
+        if (use_selection)
+        {
+            // Fit the picture to the highlighted triangles, including pieces of a split face.
+            std::vector<std::pair<int, Vec3f>> points;
+            m_triangle_selectors[size_t(mesh_id)]->append_seed_fill_points(points);
+            double u0 = std::numeric_limits<double>::infinity();
+            double u1 = -u0;
+            double v0 = u0;
+            double v1 = u1;
+            bool any_point = false;
+            for (const std::pair<int, Vec3f> &point : points)
+            {
+                const int source = point.first;
+                if (source < 0 || source >= int(its.indices.size()) || facet_mask[size_t(source)] == 0)
                     continue;
-                facet_mask[size_t(next)] = 1;
-                pending.push_back(next);
+                const Vec3i &tri = its.indices[size_t(source)];
+                if (!chart.placed[size_t(tri[0])] || !chart.placed[size_t(tri[1])] || !chart.placed[size_t(tri[2])])
+                    continue;
+                const Vec3d w0 = its.vertices[size_t(tri[0])].cast<double>();
+                const Vec3d w1 = its.vertices[size_t(tri[1])].cast<double>();
+                const Vec3d w2 = its.vertices[size_t(tri[2])].cast<double>();
+                double b0 = 0.0, b1 = 0.0, b2 = 0.0;
+                if (!image_chart_barycentric(point.second.cast<double>(), w0, w1, w2, b0, b1, b2))
+                    continue;
+                const Vec2d uv = chart.vertex_uv[size_t(tri[0])] * b0 + chart.vertex_uv[size_t(tri[1])] * b1 +
+                                 chart.vertex_uv[size_t(tri[2])] * b2;
+                u0 = std::min(u0, uv.x());
+                u1 = std::max(u1, uv.x());
+                v0 = std::min(v0, uv.y());
+                v1 = std::max(v1, uv.y());
+                any_point = true;
+            }
+            if (any_point && u1 - u0 > 1e-4 && v1 - v0 > 1e-4)
+            {
+                chart.umin = u0;
+                chart.umax = u1;
+                chart.vmin = v0;
+                chart.vmax = v1;
             }
         }
-        min_dot = 0.5f;
+        chart_its = &its;
+        chart_trafo = trafo;
     }
     else
     {
@@ -616,20 +1233,21 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
     };
 
     int selector_idx = -1;
-    bool any_surface = false;
-    for (const ModelVolume *mv : mo->volumes)
+    bool any_surface = place_on_face;
+    if (!place_on_face)
     {
-        if (!mv->is_model_part())
-            continue;
-        ++selector_idx;
-        if (selector_idx >= int(m_triangle_selectors.size()))
-            break;
-        if (place_on_face && selector_idx != mesh_id)
-            continue;
-        const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
-        double umin, umax, vmin, vmax;
-        if (project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
-            any_surface = true;
+        for (const ModelVolume *mv : mo->volumes)
+        {
+            if (!mv->is_model_part())
+                continue;
+            ++selector_idx;
+            if (selector_idx >= int(m_triangle_selectors.size()))
+                break;
+            const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
+            double umin, umax, vmin, vmax;
+            if (project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
+                any_surface = true;
+        }
     }
     if (!any_surface)
     {
@@ -640,6 +1258,80 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
     }
 
     m_place_image_armed = false;
+    if (m_bump_surface)
+    {
+        struct PendingBump
+        {
+            ModelVolume *volume{nullptr};
+            indexed_triangle_set mesh;
+        };
+        std::vector<PendingBump> pending;
+        selector_idx = -1;
+        const unsigned char *alpha = image.alpha.empty() ? nullptr : image.alpha.data();
+        for (ModelVolume *mv : mo->volumes)
+        {
+            if (!mv->is_model_part())
+                continue;
+            ++selector_idx;
+            if (selector_idx >= int(m_triangle_selectors.size()))
+                break;
+            if (place_on_face && selector_idx != mesh_id)
+                continue;
+            const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
+            double umin, umax, vmin, vmax;
+            if (place_on_face)
+            {
+                umin = chart.umin;
+                umax = chart.umax;
+                vmin = chart.vmin;
+                vmax = chart.vmax;
+            }
+            else if (!project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
+                continue;
+            std::optional<BumpDisplacement> displaced = displace_bump_map(
+                mv->mesh().its, trafo, facet_mask, place_on_face, place_on_face ? &chart : nullptr, projection.face,
+                projection.right, projection.up, umin, umax, vmin, vmax, min_dot, m_image_detail_mm, m_bump_height_mm,
+                m_bump_symmetric, m_bump_invert, image.width, image.height, image.rgb.data(), alpha);
+            if (!displaced)
+                continue;
+            pending.push_back(PendingBump{mv, std::move(displaced->mesh)});
+        }
+        if (pending.empty())
+        {
+            m_parent.get_notification_manager()->push_notification(
+                _u8L("The bump did not move the surface. Grey stays put when symmetric is on, and the edge of the selection stays flush."));
+            return;
+        }
+        m_parent.take_gizmo_snapshot(_u8L("Bump surface"));
+        // Selectors keep a reference to the mesh that set_mesh is about to replace.
+        m_triangle_selectors.clear();
+        bool cleared_paint = false;
+        for (PendingBump &item : pending)
+        {
+            if (!item.volume->color_mixing_facets.empty())
+            {
+                item.volume->color_mixing_facets.reset();
+                cleared_paint = true;
+            }
+            m_parent.clear_before_change_volume(
+                *item.volume, _u8L("Supports, seams, and other painting on this part were cleared because the bump map changed the mesh."));
+            item.volume->set_mesh(std::move(item.mesh));
+            item.volume->calculate_convex_hull();
+            item.volume->set_new_unique_id();
+            item.volume->get_object()->invalidate_bounding_box();
+        }
+        this->init_model_triangle_selectors();
+        const ModelObjectPtrs &objects = m_parent.get_model()->objects;
+        const int object_idx = int(std::find(objects.begin(), objects.end(), mo) - objects.begin());
+        m_parent.reload_scene(true, true);
+        m_parent.changed_mesh(object_idx);
+        m_parent.set_as_dirty();
+        if (cleared_paint)
+            m_parent.get_notification_manager()->push_notification(
+                _u8L("Color painting on this part was cleared because the bump map changed the mesh."));
+        return;
+    }
+
     m_parent.take_gizmo_snapshot(_u8L("Map image"));
     int assigned = 0;
     selector_idx = -1;
@@ -654,16 +1346,47 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
             continue;
         const Transform3d trafo = mo->instances[instance_idx]->get_transformation().get_matrix() * mv->get_matrix();
         double umin, umax, vmin, vmax;
-        if (!project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
+        if (place_on_face)
+        {
+            umin = chart.umin;
+            umax = chart.umax;
+            vmin = chart.vmin;
+            vmax = chart.vmax;
+        }
+        else if (!project_bounds(trafo, mv->mesh().its, umin, umax, vmin, vmax))
             continue;
         const double u_span = umax - umin;
         const double v_span = vmax - vmin;
         assigned += m_triangle_selectors[selector_idx]->paint_planar_image(
             trafo, projection.face, min_dot, m_image_detail_mm,
-            [&](const Vec3d &world_point, TriangleStateType) -> std::optional<TriangleStateType>
+            [&](const Vec3d &world_point, TriangleStateType, int source_triangle) -> std::optional<TriangleStateType>
             {
-                const double u = (world_point.dot(projection.right) - umin) / u_span;
-                const double v = (world_point.dot(projection.up) - vmin) / v_span;
+                double u = 0.0;
+                double v = 0.0;
+                if (place_on_face)
+                {
+                    if (chart_its == nullptr || source_triangle < 0 ||
+                        source_triangle >= int(chart_its->indices.size()))
+                        return std::nullopt;
+                    const Vec3i &tri = chart_its->indices[size_t(source_triangle)];
+                    if (!chart.placed[size_t(tri[0])] || !chart.placed[size_t(tri[1])] || !chart.placed[size_t(tri[2])])
+                        return std::nullopt;
+                    const Vec3d w0 = chart_trafo * chart_its->vertices[size_t(tri[0])].cast<double>();
+                    const Vec3d w1 = chart_trafo * chart_its->vertices[size_t(tri[1])].cast<double>();
+                    const Vec3d w2 = chart_trafo * chart_its->vertices[size_t(tri[2])].cast<double>();
+                    double b0 = 0.0, b1 = 0.0, b2 = 0.0;
+                    if (!image_chart_barycentric(world_point, w0, w1, w2, b0, b1, b2))
+                        return std::nullopt;
+                    const Vec2d uv = chart.vertex_uv[size_t(tri[0])] * b0 + chart.vertex_uv[size_t(tri[1])] * b1 +
+                                     chart.vertex_uv[size_t(tri[2])] * b2;
+                    u = (uv.x() - umin) / u_span;
+                    v = (uv.y() - vmin) / v_span;
+                }
+                else
+                {
+                    u = (world_point.dot(projection.right) - umin) / u_span;
+                    v = (world_point.dot(projection.up) - vmin) / v_span;
+                }
                 if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0)
                     return std::nullopt;
                 const int x = std::clamp(int(std::lround(u * (image.width - 1))), 0, image.width - 1);
@@ -673,7 +1396,7 @@ void GLGizmoColorMixing::apply_mapped_image(int mesh_id, int seed_facet)
                     return std::nullopt;
                 return TriangleStateType(palette_idx + 1);
             },
-            facet_mask.empty() ? nullptr : &facet_mask);
+            facet_mask.empty() ? nullptr : &facet_mask, selection != nullptr);
         m_triangle_selectors[selector_idx]->request_update_render_data();
     }
 
@@ -841,9 +1564,44 @@ bool GLGizmoColorMixing::gizmo_event(SLAGizmoEventType action, const Vec2d &mous
         for (const ModelVolume *mv : mo->volumes)
             if (mv->is_model_part())
                 trafo_matrices.emplace_back(mi->get_transformation().get_matrix() * mv->get_matrix());
+        std::vector<Transform3d> trafo_matrices_not_translate;
+        const Transform3d instance_trafo_not_translate = mi->get_transformation().get_matrix_no_offset();
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv->is_model_part())
+                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix_no_offset());
         update_raycast_cache(mouse_position, m_parent.get_camera(), trafo_matrices);
+        const bool fill_place = m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL ||
+                                (m_tool_type == ToolType::BRUSH &&
+                                 m_cursor_type == TriangleSelector::CursorType::POINTER);
         if (m_rr.mesh_id >= 0 && m_rr.mesh_id < int(m_triangle_selectors.size()))
-            apply_mapped_image(m_rr.mesh_id, int(m_rr.facet));
+        {
+            TriangleSelectorGUI *selector = m_triangle_selectors[size_t(m_rr.mesh_id)].get();
+            if (fill_place)
+            {
+                const Transform3d &trafo_matrix = trafo_matrices[size_t(m_rr.mesh_id)];
+                const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+                if (m_tool_type == ToolType::SMART_FILL)
+                    selector->seed_fill_select_triangles(
+                        m_rr.hit, int(m_rr.facet), trafo_matrices_not_translate[size_t(m_rr.mesh_id)], clp,
+                        m_smart_fill_angle, SmartFillGapArea,
+                        m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f,
+                        TriangleSelector::ForceReselection::YES);
+                else if (m_tool_type == ToolType::BRUSH)
+                    selector->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, m_bucket_fill_angle,
+                                                           BucketFillGapArea, TriangleSelector::BucketFillPropagate::NO,
+                                                           TriangleSelector::ForceReselection::YES);
+                else
+                    selector->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, m_bucket_fill_angle,
+                                                           BucketFillGapArea, TriangleSelector::BucketFillPropagate::YES,
+                                                           TriangleSelector::ForceReselection::YES);
+                const std::vector<unsigned char> selected = selector->seed_fill_original_facets();
+                apply_mapped_image(m_rr.mesh_id, int(m_rr.facet), &selected);
+                selector->seed_fill_unselect_all_triangles();
+                selector->request_update_render_data();
+            }
+            else
+                apply_mapped_image(m_rr.mesh_id, int(m_rr.facet));
+        }
         return true;
     }
     if (action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
@@ -1463,18 +2221,25 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
     ImGui::Separator();
     ImGuiPureWrap::text(_u8L("Map image"));
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("%s",
-                        m_image_projection == 0
-                            ? _u8L("Place on next click, then click a face. Brush painting stays "
-                                   "available until you do. Each pixel becomes the closest virtual "
-                                   "color, including 2-way and 3-way mixes. Connected surfaces that "
-                                   "point the same way are included. Transparent parts of a PNG are "
-                                   "left unpainted.")
-                                  .c_str()
-                            : _u8L("Projects a picture onto the surfaces that face the chosen side. "
-                                   "Each pixel becomes the closest virtual color, including 2-way "
-                                   "and 3-way mixes. Transparent parts of a PNG are left unpainted.")
-                                  .c_str());
+    const std::string map_help =
+        (m_bump_surface && m_image_projection == 0)
+            ? _u8L("Place on next click. The picture is a height map on the highlighted triangles, "
+                   "as one image across them. Smart fill, Bucket fill, and the pointer use that "
+                   "highlight. The brush spans neighbors within the wrap angle. White sticks out, "
+                   "black sinks in, and the edge of the selection stays flush with the rest of the part.")
+        : m_bump_surface ? _u8L("Pushes the surfaces that face the chosen side out and in by the picture's "
+                                "brightness. White sticks out and black sinks in. The edge where a face turns "
+                                "away stays flush.")
+        : m_image_projection == 0
+            ? _u8L("Place on next click. Smart fill, Bucket fill, and the pointer cover "
+                   "the highlighted triangles, and the picture continues across them as "
+                   "one image. With the brush, it spans onto neighboring surfaces within "
+                   "the wrap angle. Each pixel becomes the closest virtual color, including "
+                   "2-way and 3-way mixes. Transparent parts of a PNG are left unpainted.")
+            : _u8L("Projects a picture onto the surfaces that face the chosen side. "
+                   "Each pixel becomes the closest virtual color, including 2-way "
+                   "and 3-way mixes. Transparent parts of a PNG are left unpainted.");
+    ImGui::TextDisabled("%s", map_help.c_str());
     ImGui::PopTextWrapPos();
     // The file dialog cannot open inside this draw. A mouse-up redraw is what called us,
     // and a modal dialog from here re-enters that redraw.
@@ -1507,14 +2272,42 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         ImGui::SameLine();
         ImGui::PushItemWidth(slider_width);
         m_imgui->slider_float("##image_detail", &m_image_detail_mm, 0.3f, 4.0f, "%.2f mm", 1.0f, true,
-                              _u8L("Smaller follows the picture more closely"));
+                              m_bump_surface ? _u8L("Smaller cuts the surface into finer bumps")
+                                             : _u8L("Smaller follows the picture more closely"));
+        ImGuiPureWrap::checkbox(_u8L("Bump surface"), m_bump_surface);
+        if (m_bump_surface)
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGuiPureWrap::text(_u8L("Height"));
+            ImGui::SameLine();
+            ImGui::PushItemWidth(slider_width);
+            m_imgui->slider_float("##bump_height", &m_bump_height_mm, 0.05f, 3.0f, "%.2f mm", 1.0f, true,
+                                  _u8L("How far white sticks out of the surface"));
+            ImGuiPureWrap::checkbox(_u8L("Symmetric"), m_bump_symmetric);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Grey stays put. White sticks out and black sinks in.").c_str());
+            ImGui::SameLine();
+            ImGuiPureWrap::checkbox(_u8L("Invert"), m_bump_invert);
+        }
+        const bool fill_places_image = m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL ||
+                                       (m_tool_type == ToolType::BRUSH &&
+                                        m_cursor_type == TriangleSelector::CursorType::POINTER);
+        if (m_image_projection == 0 && !fill_places_image)
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGuiPureWrap::text(_u8L("Wrap"));
+            ImGui::SameLine();
+            ImGui::PushItemWidth(slider_width);
+            m_imgui->slider_float("##image_wrap", &m_image_wrap_deg, 20.f, 150.f, "%.0f°", 1.0f, true,
+                                  _u8L("How far the picture turns onto neighboring surfaces. 90° continues around a corner."));
+        }
         if (m_image_projection == 0)
         {
             if (ImGuiPureWrap::button(m_place_image_armed ? _u8L("Click the model… (cancel)")
                                                          : _u8L("Place on next click")))
                 m_place_image_armed = !m_place_image_armed;
         }
-        else if (ImGuiPureWrap::button(_u8L("Apply image")))
+        else if (ImGuiPureWrap::button(m_bump_surface ? _u8L("Apply bump") : _u8L("Apply image")))
             apply_mapped_image();
     }
 

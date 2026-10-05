@@ -472,13 +472,21 @@ public:
     // Triangles are split until edges are about `max_edge_world_mm`, then each leaf is
     // colored by `sample`. nullopt leaves that leaf as it was. Faces whose normal is
     // not within `min_dot` of `face_outward` are skipped, so the back of the model stays
-    // unpainted. Returns how many leaves were assigned a color.
+    // unpainted. `sample` also receives the original triangle, so a caller can look up
+    // coordinates that span several faces. Returns how many leaves were assigned a color.
     // `source_facets`, when set, is one flag per original triangle. Only those triangles are painted.
+    // `seed_fill_only` paints just the leaves smart fill or bucket fill has highlighted. Splitting
+    // a highlighted leaf for image detail keeps the new children in that selection.
     int paint_planar_image(
         const Transform3d &mesh_to_world, const Vec3d &face_outward, float min_dot, float max_edge_world_mm,
-        const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current)>
-            &sample,
-        const std::vector<unsigned char> *source_facets = nullptr);
+        const std::function<std::optional<TriangleStateType>(const Vec3d &world_point, TriangleStateType current,
+                                                              int source_triangle)> &sample,
+        const std::vector<unsigned char> *source_facets = nullptr, bool seed_fill_only = false);
+
+    // Original triangles that contain a leaf highlighted by smart fill or bucket fill.
+    std::vector<unsigned char> seed_fill_original_facets() const;
+    // Mesh-space corners of those leaves, each tagged with its original triangle.
+    void append_seed_fill_points(std::vector<std::pair<int, Vec3f>> &out) const;
 
     // Remap all triangle states using a mapping function. Used to compact color mixing
     // states to a small contiguous range for efficient segmentation.

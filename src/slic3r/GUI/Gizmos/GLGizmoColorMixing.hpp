@@ -84,13 +84,24 @@ private:
     };
     bool load_mapped_image();
     // mesh_id < 0 paints every model part in the chosen direction.
-    // A seed facet paints that face and the connected surfaces that point the same way.
-    void apply_mapped_image(int mesh_id = -1, int seed_facet = -1);
+    // A seed facet paints that face and neighboring surfaces within the wrap angle,
+    // unfolded so one picture continues across them.
+    // `selection`, when set, is that fill's original triangles (smart fill or bucket fill).
+    // The picture covers those triangles instead of the wrap-angle flood.
+    void apply_mapped_image(int mesh_id = -1, int seed_facet = -1,
+                            const std::vector<unsigned char> *selection = nullptr);
     std::optional<MappedImage> m_mapped_image;
     int m_image_projection{0};
     float m_image_detail_mm{0.6f};
+    // Degrees the picture may turn away from the clicked face. 90 continues around a corner.
+    float m_image_wrap_deg{90.f};
     // Armed only by "Place on next click". A loaded picture does not steal paint strokes.
     bool m_place_image_armed{false};
+    // The same picture is a height map: white moves out along the surface, black moves in.
+    bool m_bump_surface{false};
+    float m_bump_height_mm{0.4f};
+    bool m_bump_symmetric{true};
+    bool m_bump_invert{false};
 
     // Installed Krita presets and GIMP/Krita brush tips. Index 0 in the popup is the solid brush.
     void refresh_brush_catalog();
