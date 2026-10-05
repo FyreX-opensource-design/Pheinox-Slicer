@@ -1459,6 +1459,120 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     base_extruder = pick;
                 }
 
+                // A painted top is only a few solid layers thick, while a virtual color is the
+                // stack of filaments you can see through, down to each filament's transmission
+                // distance. Carry the mix that far under the top, and dither those layers along
+                // the toolpath the same way as the skin. The outer wall is left alone so the
+                // side of the print does not pick up the stack.
+                // dither_under_top[layer][color] is set for that stack, including the top layer.
+                std::vector<std::vector<char>> dither_under_top(color_seg.size());
+                {
+                    const SpanOfConstPtrs<Layer> mix_layers = print_object.layers();
+                    const size_t nlayers = std::min(color_seg.size(), mix_layers.size());
+                    std::vector<ExPolygons> outlines(nlayers);
+                    bool outlines_ready = false;
+                    auto layer_outline = [&](size_t layer_idx) -> const ExPolygons &
+                    {
+                        if (!outlines_ready)
+                        {
+                            for (size_t i = 0; i < nlayers; ++i)
+                            {
+                                ExPolygons ex;
+                                for (const LayerRegion *region : mix_layers[i]->regions())
+                                    for (const Surface &surface : region->slices())
+                                        ex.emplace_back(surface.expolygon);
+                                outlines[i] = union_ex(ex);
+                            }
+                            outlines_ready = true;
+                        }
+                        return outlines[layer_idx];
+                    };
+                    float wall_mm = 0.45f;
+                    if (!mix_layers.empty() && !mix_layers.front()->regions().empty())
+                        wall_mm = float(mix_layers.front()->regions().front()->flow(frExternalPerimeter).width());
+                    const float inset = float(scale_(std::max(wall_mm, 0.05f)));
+
+                    for (size_t idx = 0; idx < compact_to_state.size(); ++idx)
+                    {
+                        const StateResolution &resolution = resolve_state(compact_to_state[idx]);
+                        // Coextrusion shifts walls. It does not stack a virtual color down
+                        // through the transmission distance.
+                        if (resolution.locked || resolution.coex_count >= 2 || resolution.pattern.empty())
+                            continue;
+                        std::vector<int> uniq = resolution.pattern;
+                        std::sort(uniq.begin(), uniq.end());
+                        uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+                        if (uniq.size() != 2 && uniq.size() != 3)
+                            continue;
+
+                        float td = 0.f;
+                        for (int filament : uniq)
+                            if (filament >= 0 && filament < (int) optics.size())
+                                td = std::max(td, optics[size_t(filament)].td);
+                        if (!(td > 0.f))
+                            td = DEFAULT_FILAMENT_TD;
+                        const int cycle = std::max(1, (int) resolution.pattern.size());
+
+                        for (size_t top = 0; top < nlayers; ++top)
+                        {
+                            if (idx >= color_seg[top].size() || color_seg[top][idx].empty())
+                                continue;
+                            // Only the real top of this color. Layers already covered from
+                            // above are the shell under some higher surface.
+                            ExPolygons seed = color_seg[top][idx];
+                            if (top + 1 < nlayers)
+                                seed = diff_ex(seed, layer_outline(top + 1));
+                            if (seed.empty())
+                                continue;
+
+                            auto mark_dither = [&](size_t layer)
+                            {
+                                if (layer >= dither_under_top.size())
+                                    return;
+                                if (dither_under_top[layer].size() <= idx)
+                                    dither_under_top[layer].resize(idx + 1, 0);
+                                dither_under_top[layer][idx] = 1;
+                            };
+                            mark_dither(top);
+
+                            double filled = mix_layers[top]->height;
+                            int count = 1;
+                            for (int below = int(top) - 1; below >= 0; --below)
+                            {
+                                if (filled >= double(td) && count % cycle == 0)
+                                    break;
+                                if (idx >= color_seg[size_t(below)].size())
+                                    break;
+                                mark_dither(size_t(below));
+                                const ExPolygons &slice = layer_outline(size_t(below));
+                                ExPolygons area = intersection_ex(seed, slice);
+                                if (area.empty())
+                                    break;
+                                area = offset_ex(area, -inset);
+                                if (!area.empty())
+                                {
+                                    for (size_t other = 0; other < color_seg[size_t(below)].size() && !area.empty();
+                                         ++other)
+                                    {
+                                        if (other != idx && !color_seg[size_t(below)][other].empty())
+                                            area = diff_ex(area, color_seg[size_t(below)][other]);
+                                    }
+                                    if (idx < color_seg[size_t(below)].size() &&
+                                        !color_seg[size_t(below)][idx].empty())
+                                        area = diff_ex(area, color_seg[size_t(below)][idx]);
+                                    if (!area.empty())
+                                    {
+                                        append(color_seg[size_t(below)][idx], std::move(area));
+                                        color_seg[size_t(below)][idx] = union_ex(color_seg[size_t(below)][idx]);
+                                    }
+                                }
+                                filled += mix_layers[size_t(below)]->height;
+                                ++count;
+                            }
+                        }
+                    }
+                }
+
                 // Resolve: for each layer, move color mixing ExPolygons to physical extruder buckets
                 for (size_t layer_id = 0; layer_id < color_seg.size() && layer_id < segmentation.size(); ++layer_id)
                 {
@@ -1524,14 +1638,21 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             {
                                 DitherConfig config;
                                 physical_extruder = resolve_layer_filament(r.pattern, (int) layer_id, config);
-                                // A 2-way or 3-way mix remembers this layer's painted area so the
-                                // top infill and the wall loops around it can dither that mix.
+                                // A 2-way or 3-way mix remembers this layer's painted area. The top
+                                // and the layers within transmission distance under it dither the
+                                // mix along the toolpath. A side wall keeps one filament per layer.
                                 std::vector<int> uniq = r.pattern;
                                 std::sort(uniq.begin(), uniq.end());
                                 uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
                                 if ((uniq.size() == 2 || uniq.size() == 3) && !color_layer[idx].empty())
+                                {
+                                    const bool dither_infill = layer_id < dither_under_top.size() &&
+                                                               idx < dither_under_top[layer_id].size() &&
+                                                               dither_under_top[layer_id][idx];
                                     print_object.get_layer((int) layer_id)
-                                        ->color_mix_top_stripes.push_back({color_layer[idx], r.pattern});
+                                        ->color_mix_top_stripes.push_back({color_layer[idx], r.pattern, r.coex_count,
+                                                                           r.coex_rotation_deg, dither_infill});
+                                }
                             }
                             else
                                 // No pattern available: snap to the closest pure filament instead of

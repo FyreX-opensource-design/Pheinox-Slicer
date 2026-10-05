@@ -1883,11 +1883,6 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
         for (const Surface &s : lr->m_fill_surfaces.surfaces)
             if (s.surface_type == stTop)
                 tops.emplace_back(s.expolygon);
-    if (tops.empty())
-    {
-        color_mix_top_stripes.clear();
-        return jobs;
-    }
 
     for (ColorMixTopStripe &stripe : color_mix_top_stripes)
     {
@@ -1902,11 +1897,13 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
                 have_regions = false;
         if (!have_regions)
             continue;
-        // The top fill has to exist or this is a side wall, which keeps the per-layer filament.
-        // The stored area is the whole painted slice, so the wall loops around that top are included.
-        if (intersection_ex(tops, stripe.area).empty())
+        // A side wall keeps one filament per layer. The top, and the layers within
+        // transmission distance under it, dither along the toolpath.
+        const bool on_top = !tops.empty() && !intersection_ex(tops, stripe.area).empty();
+        if (!on_top && !stripe.dither_infill)
             continue;
-        jobs.push_back({std::move(stripe.area), std::move(stripe.pattern)});
+        jobs.push_back({std::move(stripe.area), std::move(stripe.pattern), stripe.coex_count,
+                        stripe.coex_rotation_deg, stripe.dither_infill});
     }
     color_mix_top_stripes.clear();
     return jobs;
@@ -1928,6 +1925,10 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
     if (mask.empty())
         return;
     const BoundingBox mask_bb = get_extents(mask);
+    bool dither_under = false;
+    for (const ColorMixTopStripe &job : jobs)
+        if (job.dither_infill)
+            dither_under = true;
     const double align_min = std::cos(35.0 * M_PI / 180.0);
     const double join_gap = double(scale_(0.05));
 
@@ -1966,8 +1967,15 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                 const float spacing_axis = fill_angle + float(M_PI / 2.);
                 const double axis_x = std::cos(double(spacing_axis));
                 const double axis_y = std::sin(double(spacing_axis));
-                const double pitch = std::max(double(scale_(0.05)), double(lr->flow(frTopSolidInfill).scaled_spacing()));
                 const int angle_key = (int) std::lround(double(fill_angle) / (5.0 * M_PI / 180.0));
+                auto spacing_for = [&](const ExtrusionRole &role) {
+                    FlowRole flow_role = frTopSolidInfill;
+                    if (role == ExtrusionRole::InternalInfill)
+                        flow_role = frInfill;
+                    else if (role.is_solid_infill() && role != ExtrusionRole::TopSolidInfill)
+                        flow_role = frSolidInfill;
+                    return std::max(double(scale_(0.05)), double(lr->flow(flow_role).scaled_spacing()));
+                };
 
                 for (uint32_t ei = *range.begin(); ei < *range.end(); ++ei)
                 {
@@ -1981,12 +1989,22 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                     for (ExtrusionEntity *child : eec->entities)
                     {
                         auto *path = dynamic_cast<ExtrusionPath *>(child);
-                        if (path == nullptr || path->role() != ExtrusionRole::TopSolidInfill ||
-                            !mask_bb.overlap(path->polyline.bounding_box()))
+                        if (path == nullptr || !mask_bb.overlap(path->polyline.bounding_box()))
                         {
                             rebuilt.push_back(child);
                             continue;
                         }
+                        const ExtrusionRole role = path->role();
+                        const bool top_solid = role == ExtrusionRole::TopSolidInfill;
+                        // Layers under the top, within transmission distance, dither every
+                        // infill path. The top skin itself stays on its solid lines.
+                        const bool under_infill = dither_under && role.is_infill() && !role.is_bridge();
+                        if (!top_solid && !under_infill)
+                        {
+                            rebuilt.push_back(child);
+                            continue;
+                        }
+                        const double pitch = spacing_for(role);
 
                         const ExtrusionAttributes attrs = path->attributes();
                         const bool oriented = !path->can_reverse();
@@ -2076,7 +2094,9 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                                     continue;
                                 }
                                 step /= len;
-                                if (std::abs(step.dot(line_axis)) < align_min)
+                                // Monotonic top lines drop the short connectors between them.
+                                // Infill under the top follows the path it was given.
+                                if (top_solid && std::abs(step.dot(line_axis)) < align_min)
                                 {
                                     touched = true;
                                     continue;

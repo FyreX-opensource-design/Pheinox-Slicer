@@ -235,10 +235,11 @@ public:
     // Counterbore bridge regions with forced bridge angle (radians).
     // One angle per corridor step, perpendicular to the corridor direction.
     std::vector<std::pair<ExPolygons, double>> counterbore_bridge_regions;
-    // Painted 2-way and 3-way color mixes. The area is the whole painted slice; make_fills
-    // keeps only the top surface and lays the pattern down as one filament per infill line.
+    // Painted 2-way and 3-way color mixes. The area is the whole painted slice. The top
+    // skin and the layers under it, down through the filaments' transmission distance,
+    // lay the pattern along the infill. Deeper side walls stay one filament per layer.
     // pattern holds 0-based filament slots with the recipe's multiplicity, so a 2:1 mix
-    // steps through two lines of the first filament and one of the second.
+    // steps through two beads of the first filament and one of the second.
     struct ColorMixTopStripe
     {
         ExPolygons area;
@@ -247,6 +248,8 @@ public:
         // pattern lists the tools in shift order. rotation_deg spins the shift.
         uint8_t coex_count{0};
         float coex_rotation_deg{0.f};
+        // Set for the top and the layers within transmission distance under it.
+        bool dither_infill{false};
     };
     std::vector<ColorMixTopStripe> color_mix_top_stripes;
     // Outer-wall pieces copied for the other coextrusion tools. Infill is not touched.
