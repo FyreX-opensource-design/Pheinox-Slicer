@@ -1,0 +1,137 @@
+# Native AppImages for x86_64 and ARM64.
+# Ubuntu 24.04's glibc (2.39) is the floor: these images run on Ubuntu 24.04
+# and Raspberry Pi OS Trixie, and not on Pi OS Bookworm (glibc 2.36).
+name: Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  appimage:
+    name: AppImage (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/local/.ghcup \
+            /usr/share/swift \
+            || true
+          sudo apt-get clean
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            curl \
+            ca-certificates \
+            file \
+            binutils \
+            perl \
+            python3 \
+            autoconf \
+            automake \
+            libtool \
+            gettext \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libdbus-1-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libegl1-mesa-dev \
+            mesa-common-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libxxf86vm-dev \
+            libxrender-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libpng-dev \
+            zlib1g-dev \
+            libjpeg-dev \
+            libexpat1-dev \
+            libssl-dev \
+            libffi-dev \
+            libsqlite3-dev \
+            libbz2-dev \
+            libreadline-dev \
+            libncurses-dev \
+            liblzma-dev
+
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: deps/.pkg_cache
+          key: deps-downloads-${{ hashFiles('deps/CMakeLists.txt', 'deps/CMakePresets.json', 'deps/**/*.cmake', 'deps/**/*.patch', 'deps/**/*.in') }}
+          restore-keys: |
+            deps-downloads-
+
+      - name: Cache dependency build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/build-default
+            deps/build/.DEPS_PATH.txt
+          key: deps-build-${{ matrix.arch }}-${{ hashFiles('deps/CMakeLists.txt', 'deps/CMakePresets.json', 'deps/**/*.cmake', 'deps/**/*.patch', 'deps/**/*.in') }}
+
+      - name: Build dependencies
+        run: ./build_deps.sh
+
+      - name: Build preFlight
+        run: |
+          set -euo pipefail
+          PY_PREFIX="$(cat deps/build/.DEPS_PATH.txt)/python-runtime"
+          export PATH="${PY_PREFIX}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${PY_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          python3.14 -c 'import sys; print(sys.version)'
+          ./build.sh
+
+      - name: Pack AppImage
+        run: ./pack_appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: preFlight-linux-${{ matrix.arch }}
+          path: releases/*.AppImage
+          if-no-files-found: error
+          retention-days: 14

@@ -34,10 +34,34 @@ done
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-    x86_64) PKG_ARCH="amd64" ;;
-    aarch64) PKG_ARCH="aarch64" ;;
-    *) PKG_ARCH="$ARCH" ;;
+    x86_64)
+        PKG_ARCH="amd64"
+        LDSO_NAME="ld-linux-x86-64.so.2"
+        MULTIARCH="x86_64-linux-gnu"
+        ;;
+    aarch64)
+        PKG_ARCH="aarch64"
+        LDSO_NAME="ld-linux-aarch64.so.1"
+        MULTIARCH="aarch64-linux-gnu"
+        ;;
+    *)
+        echo "ERROR: unsupported architecture '$ARCH' (want x86_64 or aarch64)"
+        exit 1
+        ;;
 esac
+# Arch keeps libraries in /usr/lib. Debian and Ubuntu use the multiarch directory.
+HOST_LIB_PATH="/usr/lib/${MULTIARCH}:/lib/${MULTIARCH}:/usr/lib64:/usr/lib:/lib64:/lib"
+
+first_dir() {
+    local p
+    for p in "$@"; do
+        if [[ -d "$p" ]]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
 
 VERSION="$(grep 'set(SLIC3R_VERSION ' "$SCRIPT_DIR/version.inc" | sed 's/.*"\(.*\)".*/\1/')"
 if [[ -z "$VERSION" ]]; then
@@ -150,7 +174,7 @@ enqueue "$BINARY"
 # WebKit subprocesses. Only the injected-bundle directory is compiled into
 # libwebkit as an absolute path; the processes live next to that directory.
 WEBKIT_SRC=""
-for d in /usr/lib/webkit2gtk-4.1 /usr/lib64/webkit2gtk-4.1 /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1; do
+for d in /usr/lib/webkit2gtk-4.1 /usr/lib64/webkit2gtk-4.1 "/usr/lib/${MULTIARCH}/webkit2gtk-4.1"; do
     if [[ -x "$d/WebKitWebProcess" ]]; then
         WEBKIT_SRC="$d"
         break
@@ -175,18 +199,19 @@ else
     echo "** WARNING: WebKit subprocesses not found; the embedded browser may not work"
 fi
 
-if [[ -d /usr/lib/gtk-3.0 ]]; then
-    cp -a /usr/lib/gtk-3.0 "$APPDIR/usr/lib/"
+if gtk_src="$(first_dir /usr/lib/gtk-3.0 /usr/lib64/gtk-3.0 "/usr/lib/${MULTIARCH}/gtk-3.0")"; then
+    mkdir -p "$APPDIR/usr/lib/gtk-3.0"
+    cp -a "$gtk_src"/. "$APPDIR/usr/lib/gtk-3.0/"
     while IFS= read -r -d '' so; do
         enqueue "$so"
     done < <(find "$APPDIR/usr/lib/gtk-3.0" -type f -name '*.so' -print0)
 fi
-if [[ -d /usr/lib/gio/modules ]]; then
+if gio_src="$(first_dir /usr/lib/gio/modules /usr/lib64/gio/modules "/usr/lib/${MULTIARCH}/gio/modules")"; then
     mkdir -p "$APPDIR/usr/lib/gio/modules"
-    cp -a /usr/lib/gio/modules/. "$APPDIR/usr/lib/gio/modules/"
+    cp -a "$gio_src"/. "$APPDIR/usr/lib/gio/modules/"
     while IFS= read -r -d '' so; do
         enqueue "$so"
-    done < <(find /usr/lib/gio/modules -type f -name '*.so' -print0)
+    done < <(find "$gio_src" -type f -name '*.so' -print0)
 fi
 if [[ -d "$APPDIR/usr/python/lib" ]]; then
     while IFS= read -r -d '' so; do
@@ -220,16 +245,26 @@ while [[ "$idx" -lt "${#SCAN_LIST[@]}" ]]; do
 done
 
 echo "** Adding Mesa software-GL fallback ..."
-for extra in /usr/lib/libGLX_mesa.so.0 /usr/lib/libEGL_mesa.so.0 /usr/lib64/libGLX_mesa.so.0 /usr/lib64/libEGL_mesa.so.0; do
+for extra in \
+    /usr/lib/libGLX_mesa.so.0 /usr/lib/libEGL_mesa.so.0 \
+    /usr/lib64/libGLX_mesa.so.0 /usr/lib64/libEGL_mesa.so.0 \
+    "/usr/lib/${MULTIARCH}/libGLX_mesa.so.0" "/usr/lib/${MULTIARCH}/libEGL_mesa.so.0"; do
     if [[ -e "$extra" ]]; then
         install_lib "$extra" softgl
         enqueue "$extra"
     fi
 done
-if [[ -d /usr/lib/dri ]]; then
+DRI_SRC=""
+for dri_dir in /usr/lib/dri /usr/lib64/dri "/usr/lib/${MULTIARCH}/dri"; do
+    if [[ -d "$dri_dir" ]]; then
+        DRI_SRC="$dri_dir"
+        break
+    fi
+done
+if [[ -n "$DRI_SRC" ]]; then
     for drv in swrast_dri.so kms_swrast_dri.so libdril_dri.so; do
-        if [[ -e "/usr/lib/dri/$drv" ]]; then
-            real="$(readlink -f "/usr/lib/dri/$drv")"
+        if [[ -e "$DRI_SRC/$drv" ]]; then
+            real="$(readlink -f "$DRI_SRC/$drv")"
             cp -a "$real" "$APPDIR/usr/lib/softgl/dri/$(basename "$real")"
             if [[ "$(basename "$real")" != "$drv" ]]; then
                 ln -sfn "$(basename "$real")" "$APPDIR/usr/lib/softgl/dri/$drv"
@@ -262,35 +297,78 @@ done
 python3 - << PY
 from pathlib import Path
 root = Path("$APPDIR/usr/lib")
-old = b"/usr/lib/webkit2gtk-4.1/injected-bundle/"
-# Same length as the original: "/usr" (4) is replaced by "././" (4).
-new = b"././" + old[len(b"/usr"):]
-if len(old) != len(new):
-    raise SystemExit(f"WebKit path patch length mismatch: {len(old)} vs {len(new)}")
+# The injected-bundle directory is compiled into libwebkit as a fixed-length
+# absolute path. Replace it with a same-length relative path that resolves to
+# usr/lib/webkit2gtk-4.1/injected-bundle when AppRun has chdir'd to usr/.
+suffix = b"lib/webkit2gtk-4.1/injected-bundle/"
+prefixes = [
+    b"/usr/lib/webkit2gtk-4.1/injected-bundle/",
+    b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/",
+    b"/usr/lib/aarch64-linux-gnu/webkit2gtk-4.1/injected-bundle/",
+]
+
+def replacement(old: bytes) -> bytes:
+    # "./" + extra slashes + suffix. Extra slashes collapse, and the Arch
+    # path keeps the previous "././lib/..." spelling.
+    if old == prefixes[0]:
+        new = b"././" + old[len(b"/usr"):]
+    else:
+        pad = len(old) - len(b"./") - len(suffix)
+        if pad < 1:
+            raise SystemExit(f"WebKit path too short to relocate: {old!r}")
+        new = b"./" + (b"/" * pad) + suffix
+    if len(old) != len(new):
+        raise SystemExit(f"WebKit path patch length mismatch: {len(old)} vs {len(new)}")
+    return new
+
 patched = 0
 for lib in root.glob("libwebkit2gtk*.so*"):
     if not lib.is_file() or lib.is_symlink():
         continue
     data = lib.read_bytes()
-    count = data.count(old)
-    if count:
-        lib.write_bytes(data.replace(old, new))
+    changed = False
+    for old in prefixes:
+        count = data.count(old)
+        if not count:
+            continue
+        data = data.replace(old, replacement(old))
         print(f"** Patched {count} WebKit path(s) in {lib.name}")
         patched += count
+        changed = True
+    if changed:
+        lib.write_bytes(data)
 if patched == 0:
     print("** WARNING: WebKit injected-bundle path was not found to patch")
 PY
 
 # The dynamic linker must keep its basename so the kernel can use it.
-if [[ ! -e "$APPDIR/usr/lib/compat/ld-linux-x86-64.so.2" ]]; then
-    ldso="$(readlink -f /lib64/ld-linux-x86-64.so.2)"
-    cp -a "$ldso" "$APPDIR/usr/lib/compat/ld-linux-x86-64.so.2"
+if [[ ! -e "$APPDIR/usr/lib/compat/$LDSO_NAME" ]]; then
+    ldso=""
+    for candidate in \
+        "/lib64/$LDSO_NAME" \
+        "/lib/$LDSO_NAME" \
+        "/lib/${MULTIARCH}/$LDSO_NAME" \
+        "/usr/lib/${MULTIARCH}/$LDSO_NAME"; do
+        if [[ -e "$candidate" ]]; then
+            ldso="$(readlink -f "$candidate")"
+            break
+        fi
+    done
+    if [[ -z "$ldso" ]]; then
+        echo "ERROR: dynamic linker $LDSO_NAME not found"
+        exit 1
+    fi
+    cp -a "$ldso" "$APPDIR/usr/lib/compat/$LDSO_NAME"
 fi
-chmod +x "$APPDIR/usr/lib/compat/ld-linux-x86-64.so.2"
+chmod +x "$APPDIR/usr/lib/compat/$LDSO_NAME"
 # NSS modules are dlopened by the bundled libc. They are not NEEDED entries,
 # so copy the ones name lookup needs when the host glibc is too old.
-for nss in /usr/lib/libnss_files.so.2 /usr/lib/libnss_dns.so.2 /usr/lib/libnss_resolve.so.2 \
-           /lib/libnss_files.so.2 /lib/libnss_dns.so.2 /lib/libnss_resolve.so.2; do
+for nss in \
+    "/lib/${MULTIARCH}/libnss_files.so.2" "/usr/lib/${MULTIARCH}/libnss_files.so.2" \
+    "/lib/${MULTIARCH}/libnss_dns.so.2" "/usr/lib/${MULTIARCH}/libnss_dns.so.2" \
+    "/lib/${MULTIARCH}/libnss_resolve.so.2" "/usr/lib/${MULTIARCH}/libnss_resolve.so.2" \
+    /usr/lib/libnss_files.so.2 /usr/lib/libnss_dns.so.2 /usr/lib/libnss_resolve.so.2 \
+    /lib/libnss_files.so.2 /lib/libnss_dns.so.2 /lib/libnss_resolve.so.2; do
     if [[ -e "$nss" ]]; then
         install_lib "$nss" compat
     fi
@@ -322,11 +400,11 @@ ver_ge() {
 
 host_glibc="\$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print \$2}')"
 nvidia=0
-if [[ -e /proc/driver/nvidia/version ]] || compgen -G '/usr/lib/libGLX_nvidia.so*' >/dev/null || compgen -G '/usr/lib64/libGLX_nvidia.so*' >/dev/null || compgen -G '/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so*' >/dev/null; then
+if [[ -e /proc/driver/nvidia/version ]] || compgen -G '/usr/lib/libGLX_nvidia.so*' >/dev/null || compgen -G '/usr/lib64/libGLX_nvidia.so*' >/dev/null || compgen -G '/usr/lib/${MULTIARCH}/libGLX_nvidia.so*' >/dev/null; then
     nvidia=1
 fi
 
-SYS_LIB="/usr/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib:/lib64:/lib:/usr/lib64"
+SYS_LIB="${HOST_LIB_PATH}"
 
 if [[ -n "\$host_glibc" ]] && ver_ge "\$host_glibc" "\$REQ_GLIBC"; then
     export LD_LIBRARY_PATH="\$HERE/usr/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
@@ -335,7 +413,7 @@ fi
 
 unset LD_LIBRARY_PATH
 if [[ "\$nvidia" -eq 0 ]]; then
-    exec ./lib/compat/ld-linux-x86-64.so.2 \\
+    exec ./lib/compat/${LDSO_NAME} \\
         --library-path "./lib:./lib/compat:\${SYS_LIB}" \\
         ./bin/preflight "\$@"
 fi
@@ -345,7 +423,7 @@ export GALLIUM_DRIVER=llvmpipe
 export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
 export __GLX_VENDOR_LIBRARY_NAME=mesa
 export LIBGL_DRIVERS_PATH="\$HERE/usr/lib/softgl/dri"
-exec ./lib/compat/ld-linux-x86-64.so.2 \\
+exec ./lib/compat/${LDSO_NAME} \\
     --library-path "./lib/softgl:./lib:./lib/compat" \\
     ./bin/preflight "\$@"
 EOF
