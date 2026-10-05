@@ -533,7 +533,13 @@ boost::variant<Point, Scarf::Scarf> Placer::place_seam(const Layer *layer, const
 
     if (po->config().seam_position.value == spNearest)
     {
-        const std::vector<Perimeters::BoundedPerimeter> &perimeters{this->perimeters_per_layer.at(po)[layer_index]};
+        // Coextrusion removes the outer wall on the layers another tool prints. Those
+        // layers never get a seam shell, so the precalculated list is shorter than the
+        // object. Indexing past it overflows vector::reserve.
+        const auto &layers = this->perimeters_per_layer.at(po);
+        if (layer_index >= layers.size())
+            return loop.first_point();
+        const std::vector<Perimeters::BoundedPerimeter> &perimeters{layers[layer_index]};
         // Same empty-precalc guard as the else branch below: a degenerate or overhang-sliver
         // layer can produce no perimeters here, and place_seam_near would index an empty vector
         // (pick_closest_bounding_box returns index 0 on an empty set). Fall back to the loop start.
@@ -546,7 +552,10 @@ boost::variant<Point, Scarf::Scarf> Placer::place_seam(const Layer *layer, const
     }
     else
     {
-        const std::vector<SeamPerimeterChoice> &seams_on_perimeters{this->seams_per_object.at(po)[layer_index]};
+        const auto &layer_seams = this->seams_per_object.at(po);
+        if (layer_index >= layer_seams.size())
+            return loop.first_point();
+        const std::vector<SeamPerimeterChoice> &seams_on_perimeters{layer_seams[layer_index]};
 
         // A loop can reach gcode emission on a layer for which seam precalculation produced no
         // choices (a degenerate or overhang sliver the perimeter-creation step filtered out).
