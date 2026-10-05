@@ -1441,6 +1441,39 @@ void PrintObject::cleanup()
         this->clear_support_layers();
 }
 
+// A virtual color keeps one recipe and only changes which filament prints each layer.
+// Interface shells must not treat that change as a new material, or every layer becomes
+// a solid top and the dither shows up through the interior.
+static bool is_virtual_color_stripe(const Layer::ColorMixTopStripe &stripe)
+{
+    if (stripe.coex_count >= 2 || stripe.area.empty() || stripe.pattern.empty())
+        return false;
+    std::vector<int> uniq = stripe.pattern;
+    std::sort(uniq.begin(), uniq.end());
+    uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+    return uniq.size() == 2 || uniq.size() == 3;
+}
+
+// Area on `other` that continues the same virtual-color recipe painted on `here`.
+static ExPolygons virtual_color_continuation(const Layer &here, const Layer &other)
+{
+    ExPolygons out;
+    for (const Layer::ColorMixTopStripe &mine : here.color_mix_top_stripes)
+    {
+        if (!is_virtual_color_stripe(mine))
+            continue;
+        for (const Layer::ColorMixTopStripe &theirs : other.color_mix_top_stripes)
+        {
+            if (!is_virtual_color_stripe(theirs) || theirs.pattern != mine.pattern)
+                continue;
+            append(out, intersection_ex(mine.area, theirs.area));
+        }
+    }
+    if (!out.empty())
+        out = union_ex(out);
+    return out;
+}
+
 // This function analyzes slices of a region (SurfaceCollection slices).
 // Each region slice (instance of Surface) is analyzed, whether it is supported or whether it is the top surface.
 // Initially all slices are of type stInternal.
@@ -1518,12 +1551,23 @@ void PrintObject::detect_surfaces_type()
                     Surfaces top;
                     if (upper_layer)
                     {
-                        ExPolygons upper_slices = interface_shells
-                                                      ? diff_ex(layerm->slices().surfaces,
-                                                                upper_layer->m_regions[region_id]->slices().surfaces,
-                                                                ApplySafetyOffset::Yes)
-                                                      : diff_ex(layerm->slices().surfaces, upper_layer->lslices,
-                                                                ApplySafetyOffset::Yes);
+                        ExPolygons upper_slices;
+                        if (interface_shells)
+                        {
+                            ExPolygons cover =
+                                to_expolygons(upper_layer->m_regions[region_id]->slices().surfaces);
+                            const ExPolygons cont = virtual_color_continuation(*layer, *upper_layer);
+                            if (!cont.empty())
+                            {
+                                append(cover, intersection_ex(to_expolygons(layerm->slices().surfaces), cont));
+                                cover = union_ex(cover);
+                            }
+                            upper_slices = diff_ex(to_expolygons(layerm->slices().surfaces), cover,
+                                                   ApplySafetyOffset::Yes);
+                        }
+                        else
+                            upper_slices = diff_ex(layerm->slices().surfaces, upper_layer->lslices,
+                                                   ApplySafetyOffset::Yes);
                         surfaces_append(top, opening_ex(upper_slices, offset), stTop);
                     }
                     else
@@ -1559,12 +1603,19 @@ void PrintObject::detect_surfaces_type()
                         if (interface_shells)
                         {
                             // non-bridging bottom surfaces: any part of this layer lying
-                            // on something else, excluding those lying on our own region
+                            // on something else, excluding those lying on our own region.
+                            // A virtual color's next filament is the same recipe, not a new material.
+                            ExPolygons own = to_expolygons(lower_layer->m_regions[region_id]->slices().surfaces);
+                            const ExPolygons cont = virtual_color_continuation(*layer, *lower_layer);
+                            if (!cont.empty())
+                            {
+                                append(own, intersection_ex(to_expolygons(layerm->slices().surfaces), cont));
+                                own = union_ex(own);
+                            }
                             surfaces_append(bottom,
-                                            opening_ex(diff_ex(intersection(layerm->slices().surfaces,
-                                                                            lower_layer->lslices), // supported
-                                                               lower_layer->m_regions[region_id]->slices().surfaces,
-                                                               ApplySafetyOffset::Yes),
+                                            opening_ex(diff_ex(intersection_ex(layerm->slices().surfaces,
+                                                                               lower_layer->lslices), // supported
+                                                               own, ApplySafetyOffset::Yes),
                                                        offset),
                                             stBottom);
                         }
@@ -2073,6 +2124,32 @@ void PrintObject::discover_vertical_shells()
                             }
 
                             combine_shells(cache.top_surfaces);
+                            if (m_config.interface_shells.value)
+                            {
+                                // The top skin is on whichever extruder printed that layer.
+                                // The solid layers under it are on the other extruders, and
+                                // this region's cache does not see that skin. Pull it in so
+                                // the top shell stays solid all the way through.
+                                const ExPolygons cont = virtual_color_continuation(*layer, *m_layers[i]);
+                                if (!cont.empty())
+                                {
+                                    const Polygons cont_polys = to_polygons(cont);
+                                    const float expand_by = float(layerm->flow(frSolidInfill).scaled_spacing()) *
+                                                            top_bottom_expansion_coeff;
+                                    for (size_t other = 0; other < layer->regions().size(); ++other)
+                                    {
+                                        if (other == region_id)
+                                            continue;
+                                        Polygons other_tops = to_polygons(
+                                            m_layers[i]->regions()[other]->slices().filter_by_type(stTop));
+                                        if (other_tops.empty())
+                                            continue;
+                                        other_tops = intersection(other_tops, cont_polys, ApplySafetyOffset::Yes);
+                                        if (!other_tops.empty())
+                                            combine_shells(offset(other_tops, expand_by));
+                                    }
+                                }
+                            }
                         }
                         if (!at_least_one_top_projected && i < int(cache_top_botom_regions.size()))
                         {
@@ -2112,6 +2189,29 @@ void PrintObject::discover_vertical_shells()
                             }
 
                             combine_shells(cache.bottom_surfaces);
+                            if (m_config.interface_shells.value)
+                            {
+                                const ExPolygons cont = virtual_color_continuation(*layer, *m_layers[i]);
+                                if (!cont.empty())
+                                {
+                                    const Polygons cont_polys = to_polygons(cont);
+                                    const float expand_by = float(layerm->flow(frSolidInfill).scaled_spacing()) *
+                                                            top_bottom_expansion_coeff;
+                                    const std::initializer_list<SurfaceType> bottoms{stBottom, stBottomBridge};
+                                    for (size_t other = 0; other < layer->regions().size(); ++other)
+                                    {
+                                        if (other == region_id)
+                                            continue;
+                                        Polygons other_bottoms = to_polygons(
+                                            m_layers[i]->regions()[other]->slices().filter_by_types(bottoms));
+                                        if (other_bottoms.empty())
+                                            continue;
+                                        other_bottoms = intersection(other_bottoms, cont_polys, ApplySafetyOffset::Yes);
+                                        if (!other_bottoms.empty())
+                                            combine_shells(offset(other_bottoms, expand_by));
+                                    }
+                                }
+                            }
                         }
 
                         if (!at_least_one_bottom_projected && i >= 0)
@@ -3896,6 +3996,45 @@ void PrintObject::discover_horizontal_shells()
 {
     BOOST_LOG_TRIVIAL(trace) << "discover_horizontal_shells()";
 
+    // The painted area moves to whichever extruder prints this layer, so the solid shell
+    // under a virtual-color top is split across regions. Turn the other region's sparse
+    // infill solid where it continues the same recipe, so the shell has no infill gap.
+    auto solidify_virtual_color_neighbors = [](Layer &neighbor, size_t home_region, const Layer &source,
+                                               const Polygons &solid)
+    {
+        if (solid.empty())
+            return;
+        const ExPolygons cont = virtual_color_continuation(neighbor, source);
+        if (cont.empty())
+            return;
+        const Polygons clip = intersection(solid, to_polygons(cont), ApplySafetyOffset::Yes);
+        if (clip.empty())
+            return;
+        for (size_t other = 0; other < neighbor.regions().size(); ++other)
+        {
+            if (other == home_region)
+                continue;
+            LayerRegion &lr = *neighbor.regions()[other];
+            const ExPolygons internal = to_expolygons(lr.fill_surfaces().filter_by_type(stInternal));
+            if (internal.empty())
+                continue;
+            ExPolygons added = intersection_ex(internal, clip, ApplySafetyOffset::Yes);
+            if (added.empty())
+                continue;
+            ExPolygons remain = diff_ex(internal, added, ApplySafetyOffset::Yes);
+            ExPolygons solid_now = union_ex(to_expolygons(lr.fill_surfaces().filter_by_type(stInternalSolid)),
+                                            std::move(added));
+            SurfaceCollection kept;
+            for (const Surface &s : lr.fill_surfaces())
+                if (s.surface_type != stInternal && s.surface_type != stInternalSolid)
+                    kept.surfaces.push_back(s);
+            lr.m_fill_surfaces = std::move(kept);
+            if (!remain.empty())
+                lr.m_fill_surfaces.append(std::move(remain), stInternal);
+            lr.m_fill_surfaces.append(std::move(solid_now), stInternalSolid);
+        }
+    };
+
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
     {
         for (size_t i = 0; i < m_layers.size(); ++i)
@@ -3991,6 +4130,9 @@ void PrintObject::discover_horizontal_shells()
                                 polygons_append(internal, to_polygons(surface.expolygon));
                         new_internal_solid = intersection(solid, internal, ApplySafetyOffset::Yes);
                     }
+                    // Same virtual color, other extruder: that layer's infill is part of this shell.
+                    if (m_config.interface_shells.value)
+                        solidify_virtual_color_neighbors(*m_layers[n], region_id, *m_layers[i], solid);
                     if (new_internal_solid.empty())
                     {
                         // No internal solid needed on this layer. In order to decide whether to continue

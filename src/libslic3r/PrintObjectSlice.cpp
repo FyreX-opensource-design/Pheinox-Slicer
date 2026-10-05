@@ -1459,12 +1459,10 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     base_extruder = pick;
                 }
 
-                // A painted top is only a few solid layers thick, while a virtual color is the
-                // stack of filaments you can see through, down to each filament's transmission
-                // distance. Carry the mix that far under the top, and dither those layers along
-                // the toolpath the same way as the skin. The outer wall is left alone so the
-                // side of the print does not pick up the stack.
-                // dither_under_top[layer][color] is set for that stack, including the top layer.
+                // Dither only the top surface shell: the exposed skin and the solid layers
+                // grown under it (top_solid_layers / top_solid_min_thickness). Sparse infill
+                // under that shell keeps one filament per layer, same as the side wall.
+                // dither_under_top[layer][color] is set for that shell, including the top layer.
                 std::vector<std::vector<char>> dither_under_top(color_seg.size());
                 {
                     const SpanOfConstPtrs<Layer> mix_layers = print_object.layers();
@@ -1491,6 +1489,14 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     if (!mix_layers.empty() && !mix_layers.front()->regions().empty())
                         wall_mm = float(mix_layers.front()->regions().front()->flow(frExternalPerimeter).width());
                     const float inset = float(scale_(std::max(wall_mm, 0.05f)));
+                    int num_top_layers = 1;
+                    double min_top_thickness = 0.;
+                    for (size_t ri = 0; ri < print_object.num_printing_regions(); ++ri)
+                    {
+                        const PrintRegionConfig &rc = print_object.printing_region(ri).config();
+                        num_top_layers = std::max(num_top_layers, rc.top_solid_layers.value);
+                        min_top_thickness = std::max(min_top_thickness, rc.top_solid_min_thickness.value);
+                    }
 
                     for (size_t idx = 0; idx < compact_to_state.size(); ++idx)
                     {
@@ -1504,14 +1510,6 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                         uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
                         if (uniq.size() != 2 && uniq.size() != 3)
                             continue;
-
-                        float td = 0.f;
-                        for (int filament : uniq)
-                            if (filament >= 0 && filament < (int) optics.size())
-                                td = std::max(td, optics[size_t(filament)].td);
-                        if (!(td > 0.f))
-                            td = DEFAULT_FILAMENT_TD;
-                        const int cycle = std::max(1, (int) resolution.pattern.size());
 
                         for (size_t top = 0; top < nlayers; ++top)
                         {
@@ -1539,7 +1537,10 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             int count = 1;
                             for (int below = int(top) - 1; below >= 0; --below)
                             {
-                                if (filled >= double(td) && count % cycle == 0)
+                                const bool need_layers = count < num_top_layers;
+                                const bool need_thickness = min_top_thickness > EPSILON &&
+                                                            filled < min_top_thickness - EPSILON;
+                                if (!need_layers && !need_thickness)
                                     break;
                                 if (idx >= color_seg[size_t(below)].size())
                                     break;
@@ -1638,9 +1639,9 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             {
                                 DitherConfig config;
                                 physical_extruder = resolve_layer_filament(r.pattern, (int) layer_id, config);
-                                // A 2-way or 3-way mix remembers this layer's painted area. The top
-                                // and the layers within transmission distance under it dither the
-                                // mix along the toolpath. A side wall keeps one filament per layer.
+                                // A 2-way or 3-way mix remembers this layer's painted area. Only the
+                                // top surface shell dithers the mix along its solid infill. A side
+                                // wall and the sparse infill keep one filament per layer.
                                 std::vector<int> uniq = r.pattern;
                                 std::sort(uniq.begin(), uniq.end());
                                 uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());

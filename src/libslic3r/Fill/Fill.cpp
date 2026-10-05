@@ -1897,8 +1897,8 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
                 have_regions = false;
         if (!have_regions)
             continue;
-        // A side wall keeps one filament per layer. The top, and the layers within
-        // transmission distance under it, dither along the toolpath.
+        // A side wall keeps one filament per layer. The top surface shell dithers
+        // along its solid infill. Sparse infill does not.
         const bool on_top = !tops.empty() && !intersection_ex(tops, stripe.area).empty();
         if (!on_top && !stripe.dither_infill)
             continue;
@@ -1996,10 +1996,10 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                         }
                         const ExtrusionRole role = path->role();
                         const bool top_solid = role == ExtrusionRole::TopSolidInfill;
-                        // Layers under the top, within transmission distance, dither every
-                        // infill path. The top skin itself stays on its solid lines.
-                        const bool under_infill = dither_under && role.is_infill() && !role.is_bridge();
-                        if (!top_solid && !under_infill)
+                        // The solid layers of the top shell dither too. Sparse infill, bridges,
+                        // and solid that is not the top shell stay one filament.
+                        const bool top_shell = dither_under && role == ExtrusionRole::SolidInfill;
+                        if (!top_solid && !top_shell)
                         {
                             rebuilt.push_back(child);
                             continue;
