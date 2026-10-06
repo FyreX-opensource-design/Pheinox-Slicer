@@ -29,6 +29,12 @@ endif()
 project(preFlight)
 
 include("version.inc")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/version.inc")
+if(NOT SLIC3R_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "SLIC3R_VERSION must start with major.minor.patch (got '${SLIC3R_VERSION}'). Edit version.inc or pass ./build.sh -version X.Y.Z")
+endif()
+set(SLIC3R_RC_VERSION "${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0")
+set(SLIC3R_RC_VERSION_DOTS "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}.0")
 include(GNUInstallDirs)
 include(CMakeDependentOption)
 
@@ -703,6 +709,9 @@ elseif (SLIC3R_FHS)
     install(FILES src/platform/unix/preFlightGcodeviewer.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     install(FILES ${SLIC3R_RESOURCES_DIR}/icons/preFlight.svg
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps RENAME preFlight.svg
+    )
+    install(FILES ${SLIC3R_RESOURCES_DIR}/icons/PheinoxSlicer.png
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/512x512/apps RENAME PheinoxSlicer.png
     )
     install(FILES ${SLIC3R_RESOURCES_DIR}/icons/preFlight-gcodeviewer.svg
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps RENAME preFlight-gcodeviewer.svg

@@ -380,7 +380,7 @@ Option::Option(const ConfigOptionDef &_opt, t_config_option_key id) : opt(_opt),
 
         // edit tooltip : change Slic3r to SLIC3R_APP_KEY
         // Temporary workaround for localization
-        tooltip.Replace("Slic3r", SLIC3R_APP_KEY, true);
+        tooltip.Replace("Slic3r", SLIC3R_APP_NAME, true);
 
         opt.tooltip = into_u8(tooltip);
     }

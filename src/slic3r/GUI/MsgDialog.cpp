@@ -163,7 +163,7 @@ void MsgDialog::apply_style(long style)
     std::string icon_name = style & wxICON_WARNING       ? "exclamation"
                             : style & wxICON_INFORMATION ? "info"
                             : style & wxICON_QUESTION    ? "question"
-                                                         : "preFlight";
+                                                         : "PheinoxSlicer";
     logo->SetBitmap(*get_bmp_bundle(icon_name, 64));
 }
 

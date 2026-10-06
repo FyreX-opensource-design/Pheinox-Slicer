@@ -14,6 +14,7 @@
 #   -flush    Force resource recompilation (Windows: icons, splash screen)
 #   -jobs N   Number of parallel build jobs (default: auto-detect)
 #   -arch A   Target architecture override (macOS: arm64/x86_64)
+#   -version V  Set the release version (for example 1.3.6) in version.inc
 #
 # Examples:
 #   ./build.sh                Build release
@@ -35,6 +36,7 @@ BUILD_DEPS=0
 FLUSH=0
 JOBS=""
 ARCH=""
+VERSION=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,8 +48,9 @@ while [[ $# -gt 0 ]]; do
         -flush)   FLUSH=1 ;;
         -jobs)    JOBS="$2"; shift ;;
         -arch)    ARCH="$2"; shift ;;
+        -version) VERSION="$2"; shift ;;
         -h|-help|--help)
-            sed -n '8,25p' "$0"
+            sed -n '8,26p' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -166,8 +169,21 @@ if command -v python3.14 >/dev/null 2>&1; then
     CMAKE_EXTRA_ARGS="$CMAKE_EXTRA_ARGS -DPython3_EXECUTABLE=$(command -v python3.14)"
 fi
 
+# One release number. Windows FILEVERSION fields are derived from this in CMake.
+if [[ -n "$VERSION" ]]; then
+    if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        echo "ERROR: -version must look like 1.3.6 (got '$VERSION')"
+        exit 1
+    fi
+    tmp="$(mktemp)"
+    sed "s/^set(SLIC3R_VERSION \".*\")/set(SLIC3R_VERSION \"$VERSION\")/" "$SCRIPT_DIR/version.inc" > "$tmp"
+    mv "$tmp" "$SCRIPT_DIR/version.inc"
+fi
+RELEASE_VERSION="$(sed -n 's/^set(SLIC3R_VERSION \"\(.*\)\")/\1/p' "$SCRIPT_DIR/version.inc")"
+
 echo "**********************************************************************"
-echo "** preFlight Build ($PLATFORM_LABEL)"
+echo "** Pheinox Slicer ($PLATFORM_LABEL)"
+echo "** Version:   $RELEASE_VERSION"
 echo "** Config:    $CONFIG"
 if [[ -n "$ARCH" ]]; then
 echo "** Arch:      $ARCH"

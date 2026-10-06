@@ -42,6 +42,9 @@ public:
     // Creates Desktop files for preFlight downloader feature
     // Registers preFlight to start on preflight:// URL
     static void perform_desktop_integration();
+    // KDE matches the window class "preflight" to ~/.local/share/applications/preflight.desktop
+    // and uses that entry's icon for the taskbar and the title bar. Point it at this app's icon.
+    static void install_user_icon();
     // Deletes Desktop files and icons for both preFlight and GcodeViewer at paths stored in App Config.
     static void undo_desktop_integration();
 

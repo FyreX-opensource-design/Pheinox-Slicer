@@ -135,7 +135,7 @@ static BOOL CALLBACK EnumWindowsProc(_In_ HWND hwnd, _In_ LPARAM lParam)
         return true;
     std::wstring classNameString(className);
     std::wstring wndTextString(wndText);
-    if (wndTextString.find(L"preFlight") != std::wstring::npos && classNameString == L"wxWindowNR")
+    if (wndTextString.find(L"Pheinox") != std::wstring::npos && classNameString == L"wxWindowNR")
     {
         //check if other instances has same instance hash
         //if not it is not same version(binary) as this version
@@ -204,7 +204,7 @@ static BOOL CALLBACK enum_windows_process_multicast(_In_ HWND hwnd, _In_ LPARAM 
         return true;
     std::wstring classNameString(className);
     std::wstring wndTextString(wndText);
-    if (wndTextString.find(L"preFlight") != std::wstring::npos && classNameString == L"wxWindowNR")
+    if (wndTextString.find(L"Pheinox") != std::wstring::npos && classNameString == L"wxWindowNR")
     {
         //check if other instances has same instance hash
         //if not it is not same version(binary) as this version

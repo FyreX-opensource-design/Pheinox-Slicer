@@ -5,8 +5,9 @@
 #include "DirectoriesUtils.hpp"
 #include "libslic3r/libslic3r.h"
 
-#include <boost/filesystem/path.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/system/error_code.hpp>
 
 #if defined(_WIN32)
 
@@ -123,8 +124,22 @@ namespace Slic3r
 std::string get_default_datadir()
 {
     const std::string config_dir = GetDataDir();
-    std::string data_dir = (boost::filesystem::path(config_dir) / SLIC3R_APP_FULL_NAME).make_preferred().string();
-    return data_dir;
+    const boost::filesystem::path data_dir =
+        (boost::filesystem::path(config_dir) / SLIC3R_APP_FULL_NAME).make_preferred();
+    // This fork used to write into upstream preFlight's folder. Copy those profiles
+    // across once, and leave the old folder in place.
+    const boost::filesystem::path legacy = (boost::filesystem::path(config_dir) / "preFlight").make_preferred();
+    if (!boost::filesystem::exists(data_dir) && boost::filesystem::is_directory(legacy))
+    {
+        boost::system::error_code ec;
+        boost::filesystem::copy(legacy, data_dir, boost::filesystem::copy_options::recursive, ec);
+        if (ec)
+            BOOST_LOG_TRIVIAL(error) << "Could not copy profiles from " << legacy.string() << " to "
+                                     << data_dir.string() << ": " << ec.message();
+        else
+            BOOST_LOG_TRIVIAL(info) << "Copied profiles from " << legacy.string() << " to " << data_dir.string();
+    }
+    return data_dir.string();
 }
 
 } // namespace Slic3r

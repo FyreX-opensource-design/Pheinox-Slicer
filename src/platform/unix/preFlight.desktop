@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=preFlight
+Name=Pheinox Slicer
 GenericName=3D Printing Software
-Icon=preFlight
+Icon=PheinoxSlicer
 Exec=preflight %F
 Terminal=false
 Type=Application

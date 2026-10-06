@@ -17,12 +17,12 @@
 
 #include "libslic3r_version.h"
 
-// Profiles for the alpha are stored into the preFlight-alpha directory to not mix with the current release.
-#define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY
+// Profile folder. Kept separate from upstream preFlight (~/.config/preFlight).
+#define SLIC3R_APP_FULL_NAME "PheinoxSlicer"
 // #define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY "-alpha"
 // #define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY "-beta"
 
-#define GCODEVIEWER_APP_NAME "preFlight G-code Viewer"
+#define GCODEVIEWER_APP_NAME "Pheinox Slicer G-code Viewer"
 #define GCODEVIEWER_APP_KEY "preFlightGcodeViewer"
 
 // this needs to be included early for MSVC (listing it in Build.PL is not enough)

@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=preFlight GCode viewer
+Name=Pheinox Slicer G-code Viewer
 Exec=preflight --gcodeviewer %F
-Icon=preFlight-gcodeviewer
+Icon=PheinoxSlicer
 Terminal=false
 Type=Application
 MimeType=text/x.gcode;

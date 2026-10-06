@@ -21,6 +21,7 @@
 #include <boost/nowide/convert.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 
 #include <wx/filename.h>
@@ -30,6 +31,54 @@ namespace Slic3r
 {
 namespace GUI
 {
+
+void DesktopIntegrationDialog::install_user_icon()
+{
+    namespace fs = boost::filesystem;
+    const fs::path src = fs::path(resources_dir()) / "icons" / "PheinoxSlicer.png";
+    if (!fs::exists(src))
+        return;
+
+    const fs::path icon_dir = fs::path(into_u8(wxFileName::GetHomeDir())) /
+                              ".local/share/icons/hicolor/512x512/apps";
+    boost::system::error_code ec;
+    fs::create_directories(icon_dir, ec);
+    const fs::path icon_png = icon_dir / "PheinoxSlicer.png";
+    fs::copy_file(src, icon_png, fs::copy_options::overwrite_existing, ec);
+    fs::copy_file(src, icon_dir / "preflight.png", fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+        BOOST_LOG_TRIVIAL(error) << "Could not install the Pheinox icon: " << ec.message();
+        return;
+    }
+
+    // The AppImage integration file is what KDE actually matches, because the binary is named preflight.
+    const fs::path desktop = fs::path(into_u8(wxFileName::GetHomeDir())) /
+                             ".local/share/applications/preflight.desktop";
+    if (!fs::exists(desktop))
+        return;
+
+    boost::nowide::ifstream in(desktop.string());
+    if (!in)
+        return;
+    std::string rewritten;
+    std::string line;
+    while (std::getline(in, line))
+    {
+        if (boost::starts_with(line, "Icon="))
+            line = "Icon=" + icon_png.string();
+        else if (line == "Name=preFlight" || line == "Name=preflight")
+            line = "Name=Pheinox Slicer";
+        rewritten += line;
+        rewritten += '\n';
+    }
+    in.close();
+    boost::nowide::ofstream out(desktop.string(), std::ios::binary | std::ios::trunc);
+    if (out)
+        out << rewritten;
+}
+
+
 
 namespace
 {
@@ -423,8 +472,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     {
         create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
         target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
-        std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
-        std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
+        std::string icon_path = GUI::format("%1%/icons/PheinoxSlicer.png", resources_dir());
+        std::string dest_path = GUI::format("%1%/icons/%2%PheinoxSlicer%3%.png", target_dir_icons, icon_theme_path,
                                             version_suffix);
         if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
             target_dir_icons.clear();
@@ -439,9 +488,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             if (contains_path_dir(target_candidates[i], "icons"))
             {
                 target_dir_icons = target_candidates[i];
-                std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
-                std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
-                                                    version_suffix);
+                std::string icon_path = GUI::format("%1%/icons/PheinoxSlicer.png", resources_dir());
+                std::string dest_path = GUI::format("%1%/icons/%2%PheinoxSlicer%3%.png", target_dir_icons,
+                                                    icon_theme_path, version_suffix);
                 if (copy_icon(icon_path, dest_path))
                     break; // success
                 else
@@ -454,9 +503,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
                 // copy icon
                 target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
-                std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
-                std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
-                                                    version_suffix);
+                std::string icon_path = GUI::format("%1%/icons/PheinoxSlicer.png", resources_dir());
+                std::string dest_path = GUI::format("%1%/icons/%2%PheinoxSlicer%3%.png", target_dir_icons,
+                                                    icon_theme_path, version_suffix);
                 if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
                 {
                     // every attempt failed - icon wont be present
@@ -472,7 +521,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     else
         // save path to icon
         app_config->set("desktop_integration_icon_slicer_path",
-                        GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
+                        GUI::format("%1%/icons/%2%PheinoxSlicer%3%.png", target_dir_icons, icon_theme_path,
                                     version_suffix));
 
     // desktop file
@@ -483,9 +532,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
 
     std::string desktop_file = GUI::format(
         "[Desktop Entry]\n"
-        "Name=preFlight%1%\n"
+        "Name=Pheinox Slicer%1%\n"
         "GenericName=3D Printing Software\n"
-        "Icon=preFlight%2%\n"
+        "Icon=PheinoxSlicer%2%\n"
         "%3%\n"
         "Terminal=false\n"
         "Type=Application\n"
@@ -583,9 +632,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         // Icon
         if (!target_dir_icons.empty())
         {
-            std::string icon_path = GUI::format("%1%/icons/preFlight-gcodeviewer.svg", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight-gcodeviewer%3%.svg", target_dir_icons,
-                                                icon_theme_path, version_suffix);
+            std::string icon_path = GUI::format("%1%/icons/PheinoxSlicer.png", resources_dir());
+            std::string dest_path = GUI::format("%1%/icons/%2%PheinoxSlicer%3%.png", target_dir_icons, icon_theme_path,
+                                                version_suffix);
             if (copy_icon(icon_path, dest_path))
                 // save path to icon
                 app_config->set("desktop_integration_icon_viewer_path", dest_path);
@@ -597,9 +646,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         std::string exec_line_viewer = flatpak_id ? GUI::format("Exec=%1% --gcodeviewer %%F", excutable_path)
                                                   : GUI::format("Exec=\"%1%\" --gcodeviewer %%F", excutable_path);
         std::string desktop_file_viewer = GUI::format("[Desktop Entry]\n"
-                                                      "Name=preFlight Gcode Viewer%1%\n"
+                                                      "Name=Pheinox Slicer G-code Viewer%1%\n"
                                                       "GenericName=3D Printing Software\n"
-                                                      "Icon=preFlight-gcodeviewer%2%\n"
+                                                      "Icon=PheinoxSlicer%2%\n"
                                                       "%3%\n"
                                                       "Terminal=false\n"
                                                       "Type=Application\n"

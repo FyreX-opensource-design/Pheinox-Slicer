@@ -227,7 +227,7 @@ public:
     bool is_recreating_gui() const { return m_is_recreating_gui; }
     bool opengl_initialized() const { return m_opengl_initialized; }
     bool legacy_prepare_layout() const { return m_legacy_prepare_layout; }
-    std::string logo_name() const { return is_editor() ? "preFlight" : "preFlight-gcodeviewer"; }
+    std::string logo_name() const { return is_editor() ? "PheinoxSlicer" : "PheinoxSlicer"; }
 
     Search::OptionsSearcher &searcher() noexcept { return *m_searcher; }
     void set_searcher(Search::OptionsSearcher *searcher) { m_searcher = searcher; }

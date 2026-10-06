@@ -41,8 +41,10 @@ static const std::string MODEL_PREFIX = "model:";
 // are phased out, then we will revert to the original name.
 // For 2.6.0-alpha1 we have switched back to the original. The file should contain data for AppUpdater.cpp
 // Version check URL removed
-static const std::string VERSION_CHECK_URL = "https://preflight3d.com/latest.version";
-static const std::string RELEASE_NOTES_URL = "https://preflight3d.com/release.notes";
+static const std::string VERSION_CHECK_URL =
+    "https://api.github.com/repos/FyreX-opensource-design/Pheinox-Slicer/releases/latest";
+// Release notes come from the GitHub release body.
+static const std::string RELEASE_NOTES_URL = "";
 // Url to index archive zip that contains latest indicies
 // Index archive URL removed
 static const std::string INDEX_ARCHIVE_URL = ""; // Disabled for preFlight

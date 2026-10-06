@@ -2850,7 +2850,7 @@ ConfigWizardIndex::ConfigWizardIndex(wxWindow *parent)
     const int logo_physical_size = 192;
     double scale_factor = parent->GetDPIScaleFactor();
     int logo_dip_size = std::max(1, static_cast<int>(logo_physical_size / scale_factor));
-    bg = ScalableBitmap(parent, "preFlight", logo_dip_size);
+    bg = ScalableBitmap(parent, "PheinoxSlicer", logo_dip_size);
 
     {
         wxBitmap bmp = bg.get_bitmap();

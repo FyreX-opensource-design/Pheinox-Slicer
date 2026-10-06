@@ -32,7 +32,7 @@ AboutDialogLogo::AboutDialogLogo(wxWindow *parent) : wxPanel(parent, wxID_ANY, w
     this->SetBackgroundColour(*wxWHITE);
     // DPI-scaled logo size (192px at 100% DPI = ~19 * em)
     int logo_size = wxGetApp().em_unit() * 19;
-    this->logo = get_bmp_bundle("preFlight", 192)->GetBitmap(wxSize(logo_size, logo_size));
+    this->logo = get_bmp_bundle("PheinoxSlicer", 192)->GetBitmap(wxSize(logo_size, logo_size));
     this->SetMinSize(this->logo.GetSize());
 
     this->Bind(wxEVT_PAINT, &AboutDialogLogo::onRepaint, this);
@@ -291,15 +291,15 @@ AboutDialog::AboutDialog()
             "%4% &copy; 2025+ oozeBot, LLC. <br />"
             "%4% Based on original work by the open-source community. <br />"
             "%5% &copy; 2011-2018 Alessandro Ranellucci. <br />"
-            "<a href=\"https://preflight3d.com/\">preFlight</a> %6% "
+            "<a href=\"https://github.com/FyreX-opensource-design/Pheinox-Slicer\">Pheinox Slicer</a> %6% "
             "<a href=\"http://www.gnu.org/licenses/agpl-3.0.html\">%7%</a>."
             "<br /><br />"
             "%8%"
             "<br /><br />"
-            "oozeBot, LLC provides preFlight \"as is\" without warranty of any kind, express or implied. "
-            "The entire risk as to the quality and performance of preFlight remains with the user. "
-            "To the maximum extent permitted by applicable law, oozeBot, LLC shall not be liable for any damages "
-            "arising out of the use or inability to use preFlight, including but not limited to direct, indirect, "
+            "Pheinox Slicer is provided \"as is\" without warranty of any kind, express or implied. "
+            "The entire risk as to the quality and performance of Pheinox Slicer remains with the user. "
+            "To the maximum extent permitted by applicable law, the authors shall not be liable for any damages "
+            "arising out of the use or inability to use Pheinox Slicer, including but not limited to direct, indirect, "
             "incidental, special, or consequential damages."
             "</font>"
             "</body>"

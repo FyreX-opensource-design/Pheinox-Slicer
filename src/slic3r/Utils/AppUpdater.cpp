@@ -6,7 +6,10 @@
 ///|/
 #include "AppUpdater.hpp"
 
+#include <boost/algorithm/string/trim.hpp>
+
 #include <atomic>
+#include <cctype>
 #include <thread>
 #include <string>
 
@@ -26,6 +29,7 @@
 #include "slic3r/Utils/Http.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "nlohmann/json.hpp"
 
 #ifdef __linux__
 #include <sys/utsname.h>
@@ -147,6 +151,8 @@ struct AppUpdater::priv
 #endif
     // parses ini tree of version file, saves to m_online_version_data and queue event(s) to UI
     void parse_version_string(const std::string &body);
+    // GitHub /repos/{owner}/{repo}/releases/latest
+    bool parse_github_release(const std::string &body);
     // thread
     std::thread m_thread;
     std::atomic_bool m_cancel;
@@ -384,7 +390,7 @@ void AppUpdater::priv::version_check(const std::string &version_check_url)
     std::string error_message;
     bool res = http_get_file(
         version_check_url,
-        5120
+        1024 * 1024
         // on_progress
         ,
         [](Http::Progress progress)
@@ -453,8 +459,134 @@ void AppUpdater::priv::version_check(const std::string &version_check_url)
     }
 }
 
+bool AppUpdater::priv::parse_github_release(const std::string &body)
+{
+    nlohmann::json release;
+    try
+    {
+        release = nlohmann::json::parse(body);
+    }
+    catch (const std::exception &ex)
+    {
+        BOOST_LOG_TRIVIAL(error) << "Failed to parse GitHub release JSON: " << ex.what();
+        return false;
+    }
+    if (!release.is_object() || !release.contains("tag_name"))
+        return false;
+
+    std::string tag = release.value("tag_name", "");
+    if (!tag.empty() && (tag.front() == 'v' || tag.front() == 'V'))
+        tag.erase(tag.begin());
+    const auto digit = tag.find_first_of("0123456789");
+    if (digit != std::string::npos && digit > 0)
+        tag = tag.substr(digit);
+    const boost::optional<Semver> version = Semver::parse(tag);
+    if (!version)
+    {
+        BOOST_LOG_TRIVIAL(error) << "GitHub release tag is not a semver: " << release.value("tag_name", "");
+        return false;
+    }
+
+    DownloadAppData new_data;
+    new_data.version = version;
+    new_data.release_page = release.value("html_url", "");
+    new_data.release_notes = release.value("body", "");
+
+    std::string arch = "amd64";
+#ifdef __linux__
+    {
+        struct utsname uts;
+        if (uname(&uts) == 0)
+        {
+            arch = uts.machine;
+            if (arch == "x86_64")
+                arch = "amd64";
+        }
+    }
+#endif
+    auto lower_copy = [](std::string text)
+    {
+        for (char &ch : text)
+            ch = (char) std::tolower((unsigned char) ch);
+        return text;
+    };
+    const nlohmann::json assets = release.contains("assets") && release["assets"].is_array() ? release["assets"]
+                                                                                              : nlohmann::json::array();
+    const nlohmann::json *chosen = nullptr;
+    for (const nlohmann::json &asset : assets)
+    {
+        if (!asset.is_object())
+            continue;
+        const std::string name = lower_copy(asset.value("name", ""));
+        bool match = false;
+#ifdef _WIN32
+#ifdef _M_ARM64
+        match = name.find("win") != std::string::npos &&
+                (name.find("arm64") != std::string::npos || name.find("aarch64") != std::string::npos);
+#else
+        match = name.find("win") != std::string::npos &&
+                (name.find("x64") != std::string::npos || name.find("amd64") != std::string::npos ||
+                 name.find("x86_64") != std::string::npos);
+#endif
+#elif defined(__APPLE__)
+        match = name.find("mac") != std::string::npos || name.find("osx") != std::string::npos ||
+                name.find(".dmg") != std::string::npos;
+#else
+        const bool linux_asset = name.find("linux") != std::string::npos || name.find("appimage") != std::string::npos;
+        if (linux_asset)
+        {
+            if (arch == "amd64")
+                match = name.find("aarch64") == std::string::npos && name.find("arm64") == std::string::npos;
+            else
+                match = name.find(arch) != std::string::npos;
+        }
+#endif
+        if (!match)
+            continue;
+        chosen = &asset;
+        if (name.find("appimage") != std::string::npos)
+            break;
+    }
+
+    if (chosen != nullptr)
+    {
+        new_data.url = chosen->value("browser_download_url", "");
+        new_data.size = chosen->value("size", 0);
+        const std::string filename = chosen->value("name", "PheinoxSlicer");
+        new_data.target_path = m_default_dest_folder / filename;
+    }
+    if (new_data.url.empty())
+    {
+        new_data.action = AppUpdaterURLAction::AUUA_OPEN_IN_BROWSER;
+        new_data.url = new_data.release_page.empty()
+                           ? "https://github.com/FyreX-opensource-design/Pheinox-Slicer/releases"
+                           : new_data.release_page;
+        new_data.target_path = m_default_dest_folder / "PheinoxSlicer";
+        new_data.size = 0;
+    }
+    set_app_data(new_data);
+    return true;
+}
+
 void AppUpdater::priv::parse_version_string(const std::string &body)
 {
+    const std::string trimmed = boost::trim_copy(body);
+    if (!trimmed.empty() && trimmed.front() == '{')
+    {
+        if (!parse_github_release(trimmed))
+        {
+            BOOST_LOG_TRIVIAL(error) << "Checking for application update has failed.";
+            const std::string version = Semver().to_string();
+            if (wxApp::GetInstance() != nullptr)
+            {
+                wxCommandEvent *evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
+                evt->SetString(GUI::from_u8(version));
+                GUI::wxGetApp().QueueEvent(evt);
+            }
+        }
+        return;
+    }
+
     size_t start = body.find('[');
     if (start == std::string::npos)
     {

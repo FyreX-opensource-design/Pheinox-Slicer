@@ -1699,11 +1699,11 @@ bool GUI_App::on_init_inner()
     {
         RichMessageDialog dlg(
             nullptr,
-            _L("You are running a 32 bit build of preFlight on 64-bit Windows."
-               "\n32 bit build of preFlight will likely not be able to utilize all the RAM available in the system."
-               "\nPlease download and install a 64 bit build of preFlight."
+            _L("You are running a 32 bit build of Pheinox Slicer on 64-bit Windows."
+               "\n32 bit build of Pheinox Slicer will likely not be able to utilize all the RAM available in the system."
+               "\nPlease download and install a 64 bit build of Pheinox Slicer."
                "\nDo you wish to continue?"),
-            "preFlight", wxICON_QUESTION | wxYES_NO);
+            SLIC3R_APP_NAME, wxICON_QUESTION | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return false;
     }
@@ -1887,7 +1887,7 @@ bool GUI_App::on_init_inner()
 
         if (!msg.empty() && !ssl_accept)
         {
-            RichMessageDialog dlg(nullptr, wxString::Format(_L("%s\nDo you want to continue?"), msg), "preFlight",
+            RichMessageDialog dlg(nullptr, wxString::Format(_L("%s\nDo you want to continue?"), msg), SLIC3R_APP_NAME,
                                   wxICON_QUESTION | wxYES_NO);
             dlg.ShowCheckBox(_L("Remember my choice"));
             if (dlg.ShowModal() != wxID_YES)
@@ -1905,9 +1905,9 @@ bool GUI_App::on_init_inner()
     {
         // Integrated but pointing to a different binary — offer to migrate.
         RichMessageDialog dlg(nullptr,
-                              _L("preFlight desktop integration points to a different version.\n"
+                              _L("Pheinox Slicer desktop integration points to a different version.\n"
                                  "Would you like to update it to this version?"),
-                              "preFlight", wxICON_QUESTION | wxYES_NO);
+                              SLIC3R_APP_NAME, wxICON_QUESTION | wxYES_NO);
         if (dlg.ShowModal() == wxID_YES)
         {
             DesktopIntegrationDialog::perform_desktop_integration();
@@ -1917,8 +1917,8 @@ bool GUI_App::on_init_inner()
     else if (!DesktopIntegrationDialog::is_integrated() && app_config->get("desktop_integration_suppressed") != "yes")
     {
         // Not integrated yet — offer first-time integration.
-        RichMessageDialog dlg(nullptr, _L("Would you like to add preFlight to your desktop applications menu?"),
-                              "preFlight", wxICON_QUESTION | wxYES_NO);
+        RichMessageDialog dlg(nullptr, _L("Would you like to add Pheinox Slicer to your desktop applications menu?"),
+                              SLIC3R_APP_NAME, wxICON_QUESTION | wxYES_NO);
         dlg.ShowCheckBox(_L("Remember my choice"));
         if (dlg.ShowModal() == wxID_YES)
         {
@@ -2104,7 +2104,7 @@ bool GUI_App::on_init_inner()
         // Pass 0 for timeout to disable the internal auto-close timer.
         // The external timer (below, after mainframe->Show) manages the splash lifetime
         // via wxWeakRef. Having two independent timers caused a use-after-free race.
-        scrn = new SplashScreen(bmp.IsOk() ? bmp : get_bmp_bundle("preFlight", 400)->GetBitmap(wxSize(400, 400)),
+        scrn = new SplashScreen(bmp.IsOk() ? bmp : get_bmp_bundle("PheinoxSlicer", 400)->GetBitmap(wxSize(400, 400)),
                                 wxSPLASH_TIMEOUT, 0, splashscreen_pos);
 
         if (!default_splashscreen_pos)
@@ -2244,6 +2244,10 @@ bool GUI_App::on_init_inner()
 
     if (!delayed_error_load_presets.empty())
         show_error(nullptr, delayed_error_load_presets);
+
+#ifdef __linux__
+    DesktopIntegrationDialog::install_user_icon();
+#endif
 
     mainframe = new MainFrame(get_app_font_pt_size(app_config));
     // hide settings tabs after first Layout
@@ -5002,12 +5006,12 @@ bool GUI_App::open_login_browser_with_dialog(const wxString &url, wxWindow *pare
 #ifdef __WXMSW__
 void GUI_App::associate_3mf_files()
 {
-    associate_file_type(L".3mf", L"preFlight.Slicer.1", L"preFlight", true);
+    associate_file_type(L".3mf", L"PheinoxSlicer.Slicer.1", L"Pheinox Slicer", true);
 }
 
 void GUI_App::associate_stl_files()
 {
-    associate_file_type(L".stl", L"preFlight.Slicer.1", L"preFlight", true);
+    associate_file_type(L".stl", L"PheinoxSlicer.Slicer.1", L"Pheinox Slicer", true);
 }
 
 void GUI_App::associate_gcode_files()
