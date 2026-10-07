@@ -1832,13 +1832,14 @@ static void collect_wall_pieces(const ExtrusionEntity *entity, std::vector<Color
 }
 
 // Walk the mix along a wall. Consecutive steps of the same filament stay one path.
-static void dither_wall_polyline(const Polyline &pl, const ExtrusionAttributes &attrs, const std::vector<int> &pattern,
-                                 int phase, double step, std::vector<ColorMixWallPiece> &out, std::vector<int> &filaments)
+// Returns how many steps the pattern advanced, so the next piece can continue it.
+static int dither_wall_polyline(const Polyline &pl, const ExtrusionAttributes &attrs, const std::vector<int> &pattern,
+                                int phase, double step, std::vector<ColorMixWallPiece> &out, std::vector<int> &filaments)
 {
     const std::vector<Polyline> steps = split_by_length(pl, step);
     const int n = (int) pattern.size();
     if (n <= 0 || steps.empty())
-        return;
+        return 0;
     int run_filament = -1;
     Polyline run;
     auto flush = [&]() {
@@ -1870,6 +1871,125 @@ static void dither_wall_polyline(const Polyline &pl, const ExtrusionAttributes &
         }
     }
     flush();
+    return (int) steps.size();
+}
+
+// How many pattern slots one filament holds before the mix changes. A 50/50
+// cycle of A A A B B B shifts by that whole run, so the other filament lands
+// on top. An alternating A B cycle shifts by one slot.
+static int pattern_run_slots(const std::vector<int> &pattern)
+{
+    const int n = (int) pattern.size();
+    if (n <= 1)
+        return 1;
+    int run = 1;
+    while (run < n && pattern[(size_t) run] == pattern[0])
+        ++run;
+    return run >= n ? 1 : run;
+}
+
+static double polyline_area2(const Polyline &pl)
+{
+    double area = 0.;
+    const size_t n = pl.points.size();
+    for (size_t i = 0, j = n - 1; i < n; j = i++)
+        area += double(pl.points[j].x()) * double(pl.points[i].y()) -
+                double(pl.points[i].x()) * double(pl.points[j].y());
+    return area;
+}
+
+// Cut `len` off the front of `pl`. The remainder starts at the cut.
+static Polyline consume_prefix(Polyline &pl, double len)
+{
+    Polyline head;
+    if (pl.points.size() < 2 || len <= 1.)
+        return head;
+    head.points.push_back(pl.points.front());
+    double left = len;
+    size_t i = 1;
+    for (; i < pl.points.size(); ++i)
+    {
+        const Point target = pl.points[i];
+        const Point from = head.points.back();
+        const double seg = (target - from).cast<double>().norm();
+        if (seg < 1.)
+            continue;
+        if (left >= seg - 1.)
+        {
+            head.points.push_back(target);
+            left -= seg;
+            if (left <= 1.)
+            {
+                ++i;
+                break;
+            }
+        }
+        else
+        {
+            const Point cut = point_at(from, target, std::min(1.0, left / seg));
+            head.points.push_back(cut);
+            pl.points.erase(pl.points.begin(), pl.points.begin() + (long) i);
+            pl.points.insert(pl.points.begin(), cut);
+            return head;
+        }
+    }
+    pl.points.erase(pl.points.begin(), pl.points.begin() + (long) std::min(i, pl.points.size()));
+    if (!head.points.empty() && (pl.points.empty() || pl.points.front() != head.points.back()))
+        pl.points.insert(pl.points.begin(), head.points.back());
+    return head;
+}
+
+// Brick the mix from the leftmost point of the wall. Each layer the joint moves
+// by half a color run, so the other filament sits on top of the previous one.
+// Counting from the loop start does not do this: that start walks with the seam
+// and the joints stay stacked.
+static void dither_anchored_wall(Polyline pl, const ExtrusionAttributes &attrs, const std::vector<int> &pattern,
+                                 int layer_id, double step, std::vector<ColorMixWallPiece> &out,
+                                 std::vector<int> &filaments)
+{
+    const int n = (int) pattern.size();
+    if (n <= 0 || pl.points.size() < 2 || step < 1.)
+        return;
+    if (pl.points.size() >= 3 && polyline_area2(pl) < -1.)
+        std::reverse(pl.points.begin(), pl.points.end());
+
+    size_t anchor = 0;
+    for (size_t i = 1; i < pl.points.size(); ++i)
+        if (pl.points[i].x() < pl.points[anchor].x() ||
+            (pl.points[i].x() == pl.points[anchor].x() && pl.points[i].y() < pl.points[anchor].y()))
+            anchor = i;
+    double dist_to_anchor = 0.;
+    for (size_t i = 0; i < anchor; ++i)
+        dist_to_anchor += (pl.points[i + 1] - pl.points[i]).cast<double>().norm();
+
+    const int run = pattern_run_slots(pattern);
+    const double period = step * double(n);
+    const double brick = 0.5 * step * double(run);
+    double coord = -dist_to_anchor + double(layer_id) * brick;
+    coord = std::fmod(coord, period);
+    if (coord < 0.)
+        coord += period;
+
+    int phase = (int) std::floor(coord / step + 1e-9) % n;
+    const double into = coord - double(phase) * step;
+    double first_len = step - into;
+    if (first_len < step * 0.15)
+    {
+        phase = (phase + 1) % n;
+        first_len = step;
+    }
+    if (first_len < step - 1.)
+    {
+        Polyline head = consume_prefix(pl, first_len);
+        if (head.points.size() >= 2)
+        {
+            out.push_back(ColorMixWallPiece{std::move(head), attrs});
+            filaments.push_back(pattern[(size_t) phase]);
+        }
+        phase = (phase + 1) % n;
+    }
+    if (pl.points.size() >= 2)
+        dither_wall_polyline(pl, attrs, pattern, phase, step, out, filaments);
 }
 
 std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
@@ -1897,8 +2017,8 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
                 have_regions = false;
         if (!have_regions)
             continue;
-        // A side wall keeps one filament per layer. The top surface shell dithers
-        // along its solid infill. Sparse infill does not.
+        // The top surface shell dithers along its solid infill. Sparse infill does
+        // not. The outer-wall mix is a separate copy and is not clipped here.
         const bool on_top = !tops.empty() && !intersection_ex(tops, stripe.area).empty();
         if (!on_top && !stripe.dither_infill)
             continue;
@@ -2287,6 +2407,14 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                     ExtrusionEntitiesPtr replacement;
                     for (ColorMixWallPiece &piece : pieces)
                     {
+                        // The outer-wall mix walks this loop itself, one bead tall, and shifts
+                        // with the layer. Leave that path whole so it is not split twice.
+                        if (this->object()->config().color_mixing_wall_z_dither.value &&
+                            piece.attrs.role.is_external_perimeter() && !piece.attrs.role.is_bridge())
+                        {
+                            replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                            continue;
+                        }
                         if (!mask_bb.overlap(piece.pl.bounding_box()))
                         {
                             replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
@@ -2330,6 +2458,155 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                             std::vector<int> filaments;
                             dither_wall_polyline(in, piece.attrs, jobs[job_i].pattern, wall_phase, step, spans, filaments);
                             ++wall_phase;
+                            for (size_t s = 0; s < spans.size(); ++s)
+                            {
+                                const int dest = region_for_filament(*this, filaments[s]);
+                                ExtrusionPath *span_path = new ExtrusionPath(std::move(spans[s].pl), spans[s].attrs);
+                                if (dest < 0 || dest == home_region)
+                                    replacement.push_back(span_path);
+                                else
+                                    wall_group_for(dest)->entities.push_back(span_path);
+                            }
+                        }
+                    }
+                    if (!touched)
+                    {
+                        for (ExtrusionEntity *made : replacement)
+                            delete made;
+                        rebuilt.push_back(child);
+                        continue;
+                    }
+                    changed = true;
+                    for (ExtrusionEntity *made : replacement)
+                        rebuilt.push_back(made);
+                    delete child;
+                }
+                if (changed)
+                    eec->entities.swap(rebuilt);
+            }
+            for (auto &g : wall_groups)
+            {
+                if (g.second->entities.empty())
+                {
+                    delete g.second;
+                    continue;
+                }
+                LayerRegion *lr = this->get_region(g.first);
+                const uint32_t begin = (uint32_t) lr->m_fills.entities.size();
+                lr->m_fills.entities.push_back(g.second);
+                island.add_fill_range(LayerExtrusionRange{(uint32_t) g.first, {begin, begin + 1}});
+            }
+        }
+}
+
+void Layer::dither_color_mix_outer_walls()
+{
+    if (color_mix_wall_z.empty() || !this->object()->config().color_mixing_wall_z_dither.value ||
+        this->object()->print()->config().spiral_vase.value)
+        return;
+
+    ExPolygons mask;
+    for (const ColorMixWallZ &stripe : color_mix_wall_z)
+        append(mask, stripe.area);
+    if (mask.empty())
+        return;
+    const BoundingBox mask_bb = get_extents(mask);
+    const int layer_phase = (int) this->id();
+    const double step = scale_(std::max(0.05, this->object()->config().color_mixing_wall_z_length.value));
+
+    for (LayerSlice &lslice : this->lslices_ex)
+        for (LayerIsland &island : lslice.islands)
+        {
+            if (island.perimeters.empty() || island.perimeters.region() >= m_regions.size())
+                continue;
+            LayerRegion *wall_region = this->get_region((int) island.perimeters.region());
+            const int home_region = (int) island.perimeters.region();
+            std::vector<std::pair<int, ExtrusionEntityCollection *>> wall_groups;
+            auto wall_group_for = [&](int region_id) -> ExtrusionEntityCollection *
+            {
+                for (auto &g : wall_groups)
+                    if (g.first == region_id)
+                        return g.second;
+                auto *collection = new ExtrusionEntityCollection();
+                collection->no_sort = true;
+                wall_groups.emplace_back(region_id, collection);
+                return collection;
+            };
+            for (uint32_t ei = *island.perimeters.begin(); ei < *island.perimeters.end(); ++ei)
+            {
+                auto *eec = dynamic_cast<ExtrusionEntityCollection *>(wall_region->m_perimeters.entities[ei]);
+                if (eec == nullptr)
+                    continue;
+                ExtrusionEntitiesPtr rebuilt;
+                rebuilt.reserve(eec->entities.size());
+                bool changed = false;
+                for (ExtrusionEntity *child : eec->entities)
+                {
+                    std::vector<ColorMixWallPiece> pieces;
+                    collect_wall_pieces(child, pieces);
+                    if (pieces.empty())
+                    {
+                        rebuilt.push_back(child);
+                        continue;
+                    }
+                    bool touched = false;
+                    ExtrusionEntitiesPtr replacement;
+                    for (ColorMixWallPiece &piece : pieces)
+                    {
+                        const bool outer = piece.attrs.role.is_external_perimeter() && !piece.attrs.role.is_bridge();
+                        if (!outer || !mask_bb.overlap(piece.pl.bounding_box()))
+                        {
+                            replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                            continue;
+                        }
+                        Polylines inside = intersection_pl(Polylines{piece.pl}, mask);
+                        if (inside.empty())
+                        {
+                            replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
+                            continue;
+                        }
+                        touched = true;
+                        for (Polyline &out : diff_pl(Polylines{piece.pl}, mask))
+                            if (out.size() >= 2)
+                                replacement.push_back(new ExtrusionPath(std::move(out), piece.attrs));
+                        for (Polyline &in : inside)
+                        {
+                            if (in.size() < 2 || in.length() < step * 0.5)
+                            {
+                                if (in.size() >= 2)
+                                    replacement.push_back(new ExtrusionPath(std::move(in), piece.attrs));
+                                continue;
+                            }
+                            const Point mid{coord_t((int64_t(in.points.front().x()) + in.points.back().x()) / 2),
+                                            coord_t((int64_t(in.points.front().y()) + in.points.back().y()) / 2)};
+                            int stripe_i = -1;
+                            for (size_t j = 0; j < color_mix_wall_z.size() && stripe_i < 0; ++j)
+                            {
+                                bool contains = false;
+                                for (const ExPolygon &ep : color_mix_wall_z[j].area)
+                                    if (ep.contains(mid))
+                                    {
+                                        contains = true;
+                                        break;
+                                    }
+                                if (!contains)
+                                    continue;
+                                bool have_regions = true;
+                                for (int filament : unique_in_order(color_mix_wall_z[j].pattern))
+                                    if (region_for_filament(*this, filament) < 0)
+                                        have_regions = false;
+                                if (have_regions)
+                                    stripe_i = (int) j;
+                            }
+                            if (stripe_i < 0)
+                            {
+                                replacement.push_back(new ExtrusionPath(std::move(in), piece.attrs));
+                                continue;
+                            }
+                            std::vector<ColorMixWallPiece> spans;
+                            std::vector<int> filaments;
+                            dither_anchored_wall(in, piece.attrs, color_mix_wall_z[(size_t) stripe_i].pattern,
+                                                 layer_phase, step, spans, filaments);
                             for (size_t s = 0; s < spans.size(); ++s)
                             {
                                 const int dest = region_for_filament(*this, filaments[s]);
@@ -2998,6 +3275,7 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
     }
 
     this->emit_color_mix_top_lines(color_mix_jobs);
+    this->dither_color_mix_outer_walls();
     this->emit_coex_partner_walls();
 
     for (LayerSlice &lslice : this->lslices_ex)

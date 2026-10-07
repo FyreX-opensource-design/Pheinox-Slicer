@@ -1905,6 +1905,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("first_layer_height", category_path + "first-layer-height");
     optgroup->append_single_option_line("color_mixing_base_layers", category_path + "color-mixing-base-layers");
     optgroup->append_single_option_line("color_mixing_base_extruder", category_path + "color-mixing-base-extruder");
+    optgroup->append_single_option_line("color_mixing_wall_z_dither", category_path + "color-mixing-wall-z-dither");
+    optgroup->append_single_option_line("color_mixing_wall_z_length", category_path + "color-mixing-wall-z-length");
 
     optgroup = page->new_optgroup_for_sidebar(L("Vertical shells"));
     optgroup->append_single_option_line("perimeters", category_path + "perimeters");

@@ -235,9 +235,10 @@ public:
     // Counterbore bridge regions with forced bridge angle (radians).
     // One angle per corridor step, perpendicular to the corridor direction.
     std::vector<std::pair<ExPolygons, double>> counterbore_bridge_regions;
-    // Painted 2-way and 3-way color mixes. The area is the whole painted slice. Only the
-    // top surface shell lays the pattern along its solid infill. Sparse infill and the
-    // side walls stay one filament per layer.
+    // Painted 2-way and 3-way color mixes. The area is the whole painted slice. The top
+    // surface shell lays the pattern along its solid infill. Sparse infill stays one
+    // filament per layer. Outer walls stay on that layer's filament unless
+    // color_mixing_wall_z_dither walks the mix along the outer wall.
     // pattern holds 0-based filament slots with the recipe's multiplicity, so a 2:1 mix
     // steps through two beads of the first filament and one of the second.
     struct ColorMixTopStripe
@@ -252,6 +253,14 @@ public:
         bool dither_infill{false};
     };
     std::vector<ColorMixTopStripe> color_mix_top_stripes;
+    // Outer walls of a 2-filament or 3-filament mix. color_mix_top_stripes is cleared
+    // once the top shell is clipped; this copy stays until the outer wall is colored.
+    struct ColorMixWallZ
+    {
+        ExPolygons area;
+        std::vector<int> pattern;
+    };
+    std::vector<ColorMixWallZ> color_mix_wall_z;
     // Outer-wall pieces copied for the other coextrusion tools. Infill is not touched.
     // Captured before the home tool's outer wall is nudged, then emitted with the fills
     // so each partner tool prints its own shifted outer bead.
@@ -836,6 +845,8 @@ protected:
     std::vector<ColorMixTopStripe> clip_color_mix_tops();
     // Dither painted top infill and the wall loops around it in the mix ratio.
     void emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs);
+    // Walk a 2- or 3-filament mix along the outer wall. The pattern steps with the layer.
+    void dither_color_mix_outer_walls();
     void emit_coex_partner_walls();
 
 private:

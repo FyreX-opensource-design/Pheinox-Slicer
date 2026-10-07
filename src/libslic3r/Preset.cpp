@@ -540,6 +540,8 @@ static std::vector<std::string> s_Preset_print_options{
     "first_layer_height",
     "color_mixing_base_layers",
     "color_mixing_base_extruder",
+    "color_mixing_wall_z_dither",
+    "color_mixing_wall_z_length",
     "perimeters",
     "spiral_vase",
     "slice_closing_radius",

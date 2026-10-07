@@ -1719,6 +1719,8 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         CreateSettingRow(content, layer_group, "first_layer_height", _L("First layer height"));
         CreateSettingRow(content, layer_group, "color_mixing_base_layers", _L("Color mixing base layers"));
         CreateSettingRow(content, layer_group, "color_mixing_base_extruder", _L("Color mixing base filament"));
+        CreateSettingRow(content, layer_group, "color_mixing_wall_z_dither", _L("Dither mixed walls in Z"));
+        CreateSettingRow(content, layer_group, "color_mixing_wall_z_length", _L("Mixed wall segment length"));
         sizer->Add(layer_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -3126,6 +3128,7 @@ void PrintSettingsPanel::ApplyToggleLogic()
     ToggleOption("outer_wall_slope_antialiasing",
                  have_perimeters && config.opt_float("outer_wall_layer_height") > 0.);
     ToggleOption("zaa_min_height", config.opt_bool("zaa_enabled"));
+    ToggleOption("color_mixing_wall_z_length", config.opt_bool("color_mixing_wall_z_dither"));
     const bool outer_scv = have_perimeters && config.opt_bool("outer_wall_scv");
     ToggleOption("outer_wall_scv", have_perimeters);
     ToggleOption("outer_wall_scv_ranges", outer_scv);

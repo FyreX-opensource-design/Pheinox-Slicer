@@ -210,6 +210,8 @@ class Settings:
     chamber_temperature: str  # semicolon-separated ints
     color_change_gcode: str
     color_mixing_base_layers: str  # int
+    color_mixing_wall_z_dither: str  # bool (0/1)
+    color_mixing_wall_z_length: str  # float
     colorprint_heights: str  # semicolon-separated floats
     complete_objects: str  # bool (0/1)
     conical_angle: str  # float

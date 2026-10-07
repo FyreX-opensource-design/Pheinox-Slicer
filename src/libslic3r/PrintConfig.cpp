@@ -539,6 +539,29 @@ void PrintConfigDef::init_common_params()
                                                                              {"volume_default", L("Volume default")}});
     def->set_default_value(new ConfigOptionEnum<ColorMixingBaseExtruder>(cmbeDarkest));
 
+    def = this->add("color_mixing_wall_z_dither", coBool);
+    def->label = L("Dither mixed walls in Z");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("For a 2-filament or 3-filament virtual color, walk the mix along the outer wall "
+                     "loop. Parts of that loop print with one filament and parts with the others, in the "
+                     "same ratio, and the pattern steps along the wall on each layer. The wall stays one "
+                     "bead tall. Inner walls, sparse infill, bridges, and coextrusion stay one filament "
+                     "for the layer. Off keeps the whole outer wall on the layer's filament.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("color_mixing_wall_z_length", coFloat);
+    def->label = L("Mixed wall segment length");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Length of each filament stretch along the outer wall when mixed walls are dithered "
+                     "in Z. A longer segment keeps one filament on the wall before the mix switches. "
+                     "The pattern still steps by one segment on the next layer.");
+    def->sidetext = L("mm");
+    def->min = 0.2;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(4.));
+
     def = this->add("max_print_height", coFloat);
     def->label = L("Max print height");
     def->tooltip = L("Set this to the maximum height that can be reached by your extruder while printing.");

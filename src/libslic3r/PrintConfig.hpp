@@ -991,7 +991,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, brim_separation))((ConfigOptionEnum<BrimType>, brim_type))((ConfigOptionFloat, brim_width))(
         (ConfigOptionFloat, brim_ears_max_angle))((ConfigOptionFloat, brim_ears_detection_length))(
         (ConfigOptionEnum<ColorMixingBaseExtruder>, color_mixing_base_extruder))(
-        (ConfigOptionInt, color_mixing_base_layers))((ConfigOptionBool, dont_support_bridges))(
+        (ConfigOptionInt, color_mixing_base_layers))((ConfigOptionBool, color_mixing_wall_z_dither))(
+        (ConfigOptionFloat, color_mixing_wall_z_length))(
+        (ConfigOptionBool, dont_support_bridges))(
         (ConfigOptionFloat, elefant_foot_compensation))((ConfigOptionBool, extrusion_width_percent_of_nozzle))(
         (ConfigOptionFloatOrPercent, extrusion_width))((ConfigOptionFloat, first_layer_acceleration_over_raft))(
         (ConfigOptionFloatOrPercent, first_layer_speed_over_raft))

@@ -1639,9 +1639,10 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             {
                                 DitherConfig config;
                                 physical_extruder = resolve_layer_filament(r.pattern, (int) layer_id, config);
-                                // A 2-way or 3-way mix remembers this layer's painted area. Only the
-                                // top surface shell dithers the mix along its solid infill. A side
-                                // wall and the sparse infill keep one filament per layer.
+                                // A 2-way or 3-way mix remembers this layer's painted area. The top
+                                // surface shell dithers the mix along its solid infill. Sparse infill
+                                // stays one filament per layer. The same area is kept for the outer
+                                // wall, which can stack the mix through the layer height.
                                 std::vector<int> uniq = r.pattern;
                                 std::sort(uniq.begin(), uniq.end());
                                 uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
@@ -1650,9 +1651,11 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                                     const bool dither_infill = layer_id < dither_under_top.size() &&
                                                                idx < dither_under_top[layer_id].size() &&
                                                                dither_under_top[layer_id][idx];
-                                    print_object.get_layer((int) layer_id)
-                                        ->color_mix_top_stripes.push_back({color_layer[idx], r.pattern, r.coex_count,
-                                                                           r.coex_rotation_deg, dither_infill});
+                                    Layer *mix_layer = print_object.get_layer((int) layer_id);
+                                    mix_layer->color_mix_top_stripes.push_back({color_layer[idx], r.pattern,
+                                                                                r.coex_count, r.coex_rotation_deg,
+                                                                                dither_infill});
+                                    mix_layer->color_mix_wall_z.push_back({color_layer[idx], r.pattern});
                                 }
                             }
                             else

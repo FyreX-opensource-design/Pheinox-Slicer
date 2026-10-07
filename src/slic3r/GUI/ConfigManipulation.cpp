@@ -817,6 +817,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     toggle_field("outer_wall_scv", have_perimeters);
     toggle_field("outer_wall_scv_ranges", outer_scv);
     toggle_field("zaa_min_height", config->opt_bool("zaa_enabled"));
+    toggle_field("color_mixing_wall_z_length", config->opt_bool("color_mixing_wall_z_dither"));
 
     if (config->option("feature_temp_wait") != nullptr)
     {

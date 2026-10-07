@@ -1352,6 +1352,11 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
         }
+        else if (opt_key == "color_mixing_wall_z_dither" || opt_key == "color_mixing_wall_z_length")
+        {
+            // The outer wall is split while fills are built, on top of the perimeter loops.
+            steps.emplace_back(posPerimeters);
+        }
         else if (opt_key == "enable_dynamic_overhang_speeds" || opt_key == "overhang_speed_0" ||
                  opt_key == "overhang_speed_1" || opt_key == "overhang_speed_2" || opt_key == "overhang_speed_3")
         {

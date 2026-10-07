@@ -31,6 +31,9 @@ Though the community has made a lot of post proccessers, and now (among other fe
 * (TenTech): feature based flow, temp, and gcode start/end: https://github.com/TengerTechnologies/FeatureBasedGcodeSettings
 * (modified from RotBot et al.): sliced conical slicing.
 * (dev past work): SCV based on angle (klipper/Kailco only): https://github.com/FyreX-opensource-design/gcode-post-processors/blob/main/SCV.py
+* (own work): top surface color dither
+* (own work): wall shift virtual co extrude (2 and 3 color).
+* (CNCKitchen): Bump map application: https://github.com/CNCKitchen/stlTexturizer/tree/main
 
 - Visit **[preflight3d.com](https://preflight3d.com)** for features, screenshots, and details.
 - Community discussion on [GitHub Discussions](https://github.com/oozebot/preFlight/discussions/categories/preflight-features) and the [Duet3D forum](https://forum.duet3d.com/category/44/preflight).
