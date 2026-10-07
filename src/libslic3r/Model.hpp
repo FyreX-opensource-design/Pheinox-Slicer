@@ -981,18 +981,29 @@ struct ColorMixingRecipe
     uint8_t coex_count = 0;
     int8_t coex_extruders[3] = {-1, -1, -1};
     float coex_rotation_deg = 0.f;
+    // Digits 0-9, each one physical extruder. "0123210" repeats that sequence.
+    // Empty means the color comes from the generated palette.
+    std::string pattern;
+    // The sequence fades from one extruder to the next over a few layers, then repeats.
+    bool gradient = false;
+    // Layers each mix ratio lasts, and how many beads express that ratio along the wall.
+    uint8_t gradient_hold = 0;
+    uint8_t gradient_span = 0;
 
     ColorMixingRecipe() = default;
     ColorMixingRecipe(uint32_t rgb_, int8_t lock_) : rgb(rgb_), extruder_lock(lock_) {}
 
     bool is_locked() const { return extruder_lock >= 0; }
     bool is_coextruded() const { return coex_count == 2 || coex_count == 3; }
+    bool has_pattern() const { return !pattern.empty(); }
 
     bool operator==(const ColorMixingRecipe &o) const
     {
         return rgb == o.rgb && extruder_lock == o.extruder_lock && coex_count == o.coex_count &&
                coex_extruders[0] == o.coex_extruders[0] && coex_extruders[1] == o.coex_extruders[1] &&
-               coex_extruders[2] == o.coex_extruders[2] && coex_rotation_deg == o.coex_rotation_deg;
+               coex_extruders[2] == o.coex_extruders[2] && coex_rotation_deg == o.coex_rotation_deg &&
+               pattern == o.pattern && gradient == o.gradient && gradient_hold == o.gradient_hold &&
+               gradient_span == o.gradient_span;
     }
     bool operator!=(const ColorMixingRecipe &o) const { return !(*this == o); }
 
@@ -1000,7 +1011,7 @@ struct ColorMixingRecipe
     void serialize(Archive &ar)
     {
         ar(rgb, extruder_lock, coex_count, coex_extruders[0], coex_extruders[1], coex_extruders[2],
-           coex_rotation_deg);
+           coex_rotation_deg, pattern, gradient, gradient_hold, gradient_span);
     }
 };
 

@@ -1347,6 +1347,11 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     // 2 or 3: walls of these tools are shifted apart. pattern is the tool order.
                     uint8_t coex_count = 0;
                     float coex_rotation_deg = 0.f;
+                    bool gradient = false;
+                    int gradient_hold = 0;
+                    int gradient_span = 0;
+                    // Shift order for a coextruded fade. Empty means `pattern` is that order.
+                    std::vector<int> coex_tools;
                 };
                 std::map<int, StateResolution> resolution_cache;
 
@@ -1360,7 +1365,43 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     if (recipes && recipe_idx >= 0 && recipe_idx < (int) recipes->size())
                     {
                         const ColorMixingRecipe &rec = (*recipes)[recipe_idx];
-                        if (rec.is_locked())
+                        if (rec.has_pattern())
+                        {
+                            r.fallback_extruder = closest_pure_filament(rec.rgb);
+                            const int tool_limit = (int) num_extruders;
+                            for (char digit : rec.pattern)
+                            {
+                                if (digit < '0' || digit > '9')
+                                    continue;
+                                const int tool = digit - '0';
+                                if (tool >= 0 && tool < tool_limit)
+                                    r.pattern.push_back(tool);
+                            }
+                            if (r.pattern.empty())
+                                r.pattern.push_back(r.fallback_extruder);
+                            else
+                                r.fallback_extruder = r.pattern.front();
+                            r.gradient = rec.gradient;
+                            r.gradient_hold = rec.gradient_hold;
+                            r.gradient_span = rec.gradient_span;
+                            if (rec.is_coextruded())
+                            {
+                                r.coex_count = rec.coex_count;
+                                r.coex_rotation_deg = rec.coex_rotation_deg;
+                                for (int k = 0; k < (int) rec.coex_count; ++k)
+                                {
+                                    const int tool = (int) rec.coex_extruders[k];
+                                    if (tool >= 0 && tool < tool_limit)
+                                        r.coex_tools.push_back(tool);
+                                }
+                                if (r.coex_tools.size() < 2)
+                                {
+                                    r.coex_tools.clear();
+                                    r.coex_count = 0;
+                                }
+                            }
+                        }
+                        else if (rec.is_locked())
                         {
                             r.locked = true;
                             r.extruder = (int) rec.extruder_lock;
@@ -1503,12 +1544,13 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                         const StateResolution &resolution = resolve_state(compact_to_state[idx]);
                         // Coextrusion shifts walls. It does not stack a virtual color down
                         // through the transmission distance.
-                        if (resolution.locked || resolution.coex_count >= 2 || resolution.pattern.empty())
+                        if (resolution.locked || resolution.coex_count >= 2 || resolution.gradient ||
+                            resolution.pattern.empty())
                             continue;
                         std::vector<int> uniq = resolution.pattern;
                         std::sort(uniq.begin(), uniq.end());
                         uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
-                        if (uniq.size() != 2 && uniq.size() != 3)
+                        if (uniq.size() < 2)
                             continue;
 
                         for (size_t top = 0; top < nlayers; ++top)
@@ -1574,6 +1616,67 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                     }
                 }
 
+                // The mix painted on this layer. A packed fade stores one ratio every `span` beads
+                // and holds it for `gradient_hold` layers. An older fade is one filament per layer;
+                // the wall mix is then the filaments in the layers just above it.
+                auto gradient_mix_at = [](const std::vector<int> &pattern, int layer_id, int hold, int span)
+                {
+                    std::vector<int> mix;
+                    if (pattern.empty())
+                        return mix;
+                    if (hold >= 1 && span >= 2 && pattern.size() % size_t(span) == 0)
+                    {
+                        const int steps = int(pattern.size() / size_t(span));
+                        int step = layer_id / hold;
+                        step %= steps;
+                        if (step < 0)
+                            step += steps;
+                        const auto begin = pattern.begin() + step * span;
+                        return std::vector<int>(begin, begin + span);
+                    }
+                    const int n = int(pattern.size());
+                    const int window = std::min(n, 4);
+                    const int origin = ((layer_id % n) + n) % n;
+                    std::vector<std::pair<int, int>> counts;
+                    for (int i = 0; i < window; ++i)
+                    {
+                        const int tool = pattern[(origin + i) % n];
+                        bool found = false;
+                        for (auto &count : counts)
+                            if (count.first == tool)
+                            {
+                                ++count.second;
+                                found = true;
+                                break;
+                            }
+                        if (!found)
+                            counts.emplace_back(tool, 1);
+                    }
+                    std::sort(counts.begin(), counts.end(),
+                              [](const std::pair<int, int> &a, const std::pair<int, int> &b)
+                              { return a.second > b.second; });
+                    std::vector<int> tools;
+                    std::vector<float> weights;
+                    for (const auto &count : counts)
+                    {
+                        tools.push_back(count.first);
+                        weights.push_back(float(count.second));
+                    }
+                    return build_ordered_pattern(tools, weights, std::max(4, window));
+                };
+
+                auto push_coex_stripe = [](Layer &layer, const ExPolygons &area, const StateResolution &r)
+                {
+                    Layer::ColorMixTopStripe stripe;
+                    stripe.area = area;
+                    stripe.pattern = r.coex_tools.empty() ? r.pattern : r.coex_tools;
+                    stripe.coex_count = r.coex_count;
+                    stripe.coex_rotation_deg = r.coex_rotation_deg;
+                    if (r.gradient)
+                        stripe.schedule = r.pattern;
+                    layer.color_mix_top_stripes.push_back(std::move(stripe));
+                };
+
                 // Resolve: for each layer, move color mixing ExPolygons to physical extruder buckets
                 for (size_t layer_id = 0; layer_id < color_seg.size() && layer_id < segmentation.size(); ++layer_id)
                 {
@@ -1613,9 +1716,7 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             if (r.coex_count >= 2)
                             {
                                 if (!color_layer[idx].empty())
-                                    print_object.get_layer((int) layer_id)
-                                        ->color_mix_top_stripes.push_back(
-                                            {color_layer[idx], r.pattern, r.coex_count, r.coex_rotation_deg});
+                                    push_coex_stripe(*print_object.get_layer((int) layer_id), color_layer[idx], r);
                                 coex_leave = true;
                             }
                             else
@@ -1628,34 +1729,50 @@ void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_can
                             const StateResolution &r = resolve_state(original_state);
                             if (r.coex_count >= 2 && !color_layer[idx].empty())
                             {
-                                print_object.get_layer((int) layer_id)
-                                    ->color_mix_top_stripes.push_back(
-                                        {color_layer[idx], r.pattern, r.coex_count, r.coex_rotation_deg});
+                                push_coex_stripe(*print_object.get_layer((int) layer_id), color_layer[idx], r);
                                 coex_leave = true;
                             }
                             else if (r.locked)
                                 physical_extruder = r.extruder;
                             else if (!r.pattern.empty())
                             {
+                                const bool fade = r.gradient && r.coex_count < 2;
+                                const std::vector<int> spatial =
+                                    fade ? gradient_mix_at(r.pattern, (int) layer_id, r.gradient_hold, r.gradient_span)
+                                         : std::vector<int>{};
+                                const std::vector<int> &mix = fade ? spatial : r.pattern;
                                 DitherConfig config;
-                                physical_extruder = resolve_layer_filament(r.pattern, (int) layer_id, config);
-                                // A 2-way or 3-way mix remembers this layer's painted area. The top
-                                // surface shell dithers the mix along its solid infill. Sparse infill
-                                // stays one filament per layer. The same area is kept for the outer
-                                // wall, which can stack the mix through the layer height.
-                                std::vector<int> uniq = r.pattern;
+                                // A fade keeps one filament for the infill and inner walls. Changing
+                                // filament every layer makes each step a solid top, so the mix never
+                                // shows as a ratio on the outer wall.
+                                physical_extruder = fade ? (r.pattern.empty() ? r.fallback_extruder : r.pattern.front())
+                                                         : resolve_layer_filament(r.pattern, (int) layer_id, config);
+                                // A mix of two or more filaments remembers this layer's painted area.
+                                // The top surface shell dithers the mix along its solid infill. Sparse
+                                // infill stays one filament per layer. The outer wall walks the same mix,
+                                // and a fade uses this layer's ratio so the balance shifts up the part.
+                                std::vector<int> uniq = mix;
                                 std::sort(uniq.begin(), uniq.end());
                                 uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
-                                if ((uniq.size() == 2 || uniq.size() == 3) && !color_layer[idx].empty())
+                                if (uniq.size() >= 2 && !color_layer[idx].empty())
                                 {
                                     const bool dither_infill = layer_id < dither_under_top.size() &&
                                                                idx < dither_under_top[layer_id].size() &&
                                                                dither_under_top[layer_id][idx];
                                     Layer *mix_layer = print_object.get_layer((int) layer_id);
-                                    mix_layer->color_mix_top_stripes.push_back({color_layer[idx], r.pattern,
-                                                                                r.coex_count, r.coex_rotation_deg,
-                                                                                dither_infill});
-                                    mix_layer->color_mix_wall_z.push_back({color_layer[idx], r.pattern});
+                                    Layer::ColorMixTopStripe stripe;
+                                    stripe.area = color_layer[idx];
+                                    stripe.pattern = mix;
+                                    stripe.coex_count = r.coex_count;
+                                    stripe.coex_rotation_deg = r.coex_rotation_deg;
+                                    stripe.dither_infill = dither_infill;
+                                    stripe.skip_overhang = fade;
+                                    mix_layer->color_mix_top_stripes.push_back(std::move(stripe));
+                                    Layer::ColorMixWallZ wall;
+                                    wall.area = color_layer[idx];
+                                    wall.pattern = mix;
+                                    wall.force = fade;
+                                    mix_layer->color_mix_wall_z.push_back(std::move(wall));
                                 }
                             }
                             else

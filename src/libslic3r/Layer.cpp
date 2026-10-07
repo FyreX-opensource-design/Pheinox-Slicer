@@ -1113,8 +1113,11 @@ struct CoexShiftJob
 
 // Which coextruded tool owns this layer's single outer wall. Two tools alternate.
 // Three tools cycle. The other tools do not print a wall on this layer.
-int coex_layer_tool(const std::vector<int> &tools, uint8_t count, size_t layer_id)
+int coex_layer_tool(const std::vector<int> &tools, uint8_t count, size_t layer_id,
+                    const std::vector<int> &schedule)
 {
+    if (schedule.size() >= 2)
+        return schedule[layer_id % schedule.size()];
     const int n = std::min(int(count), int(tools.size()));
     if (n < 2)
         return -1;
@@ -1398,6 +1401,7 @@ void capture_coex_partner_walls(Layer &layer, const std::vector<const Layer::Col
             wall.tools = stripe.pattern;
             wall.coex_count = stripe.coex_count;
             wall.rotation_deg = stripe.coex_rotation_deg;
+            wall.schedule = stripe.schedule;
             layer.coex_partner_walls.push_back(std::move(wall));
         }
     };
@@ -1489,7 +1493,7 @@ void Layer::emit_coex_partner_walls()
 
     for (const CoexPartnerWall &src : coex_partner_walls)
     {
-        const int tool = coex_layer_tool(src.tools, src.coex_count, id());
+        const int tool = coex_layer_tool(src.tools, src.coex_count, id(), src.schedule);
         if (tool < 0 || tool == src.home_filament)
             continue;
         const bool reference = tool == src.tools.front();
@@ -1728,7 +1732,7 @@ void Layer::make_perimeters()
         jobs.reserve(this->color_mix_top_stripes.size());
         for (const ColorMixTopStripe &stripe : this->color_mix_top_stripes)
         {
-            if (stripe.area.empty() || stripe.pattern.size() < 2)
+            if (stripe.z_only || stripe.skip_overhang || stripe.area.empty() || stripe.pattern.size() < 2)
                 continue;
             if (stripe.coex_count >= 2)
                 coex_stripes.push_back(&stripe);
@@ -1751,7 +1755,7 @@ void Layer::make_perimeters()
             std::vector<CoexShiftJob> shifts;
             for (const ColorMixTopStripe *stripe : coex_stripes)
             {
-                const int active = coex_layer_tool(stripe->pattern, stripe->coex_count, this->id());
+                const int active = coex_layer_tool(stripe->pattern, stripe->coex_count, this->id(), stripe->schedule);
                 if (active < 0)
                     continue;
                 if (filament == active)

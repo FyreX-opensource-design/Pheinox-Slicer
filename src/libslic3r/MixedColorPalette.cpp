@@ -440,6 +440,172 @@ void MixedColorPalette::auto_generate(const std::vector<FilamentOptics> &filamen
     append_coextruded_colors(m_colors, m_next_id, filaments, layer_height, max_cycle_length, unique_indices);
 }
 
+ColorRGB MixedColorPalette::predict_pattern(const std::vector<int> &pattern,
+                                             const std::vector<FilamentOptics> &filaments, float layer_height)
+{
+    if (pattern.empty() || filaments.empty() || layer_height <= 0.f)
+        return ColorRGB::WHITE();
+    float max_td = 0.f;
+    for (int idx : pattern)
+        if (idx >= 0 && idx < (int) filaments.size())
+            max_td = std::max(max_td, filaments[idx].td);
+    const float cycles = std::max(1.f, float(pattern.size()));
+    int reps = (int) std::ceil(max_td / (layer_height * cycles));
+    if (reps < 3)
+        reps = 3;
+    if (reps > 32)
+        reps = 32;
+    std::vector<std::pair<int, float>> stack;
+    stack.reserve((size_t) reps * pattern.size());
+    for (int rep = 0; rep < reps; ++rep)
+        for (int idx : pattern)
+            stack.emplace_back(idx, layer_height);
+    return ColorMixing::predict_stack(stack, filaments);
+}
+
+struct GradientPlan
+{
+    // One bead-mix per ratio, packed end to end. Each piece is `span` long.
+    std::vector<int> spatial;
+    // The dominant filament of each ratio, repeated `hold` times. Coextrusion follows this.
+    std::vector<int> held;
+    int hold = 2;
+    int span = 4;
+};
+
+static GradientPlan plan_gradient(const std::vector<int> &tools, int hold)
+{
+    GradientPlan plan;
+    plan.hold = std::clamp(hold, 1, 4);
+    plan.span = 4;
+    if (tools.size() < 2)
+        return plan;
+    // Out along the extruders and back through the middle, then close the loop.
+    std::vector<int> tour = tools;
+    for (int i = int(tools.size()) - 2; i >= 1; --i)
+        tour.push_back(tools[i]);
+    tour.push_back(tools.front());
+
+    // 25%, 50%, and 75% of the destination. A solid step would print as one extruder
+    // for the whole layer, which reads as a digit pattern instead of a mix.
+    const float shares[] = {0.25f, 0.5f, 0.75f};
+    std::vector<int> previous;
+    for (size_t edge = 0; edge + 1 < tour.size(); ++edge)
+    {
+        const int from = tour[edge];
+        const int to = tour[edge + 1];
+        if (from == to)
+            continue;
+        for (float share : shares)
+        {
+            const std::vector<int> chunk =
+                build_bresenham_pattern({from, to}, {1.f - share, share}, plan.span);
+            if (chunk.size() != (size_t) plan.span)
+                continue;
+            const bool mixed = std::find(chunk.begin(), chunk.end(), from) != chunk.end() &&
+                               std::find(chunk.begin(), chunk.end(), to) != chunk.end();
+            std::vector<int> ratio = chunk;
+            std::sort(ratio.begin(), ratio.end());
+            const bool repeats_first = plan.spatial.size() >= (size_t) plan.span &&
+                                       std::equal(plan.spatial.begin(), plan.spatial.begin() + plan.span, chunk.begin());
+            std::vector<int> first_ratio;
+            if (plan.spatial.size() >= (size_t) plan.span)
+            {
+                first_ratio.assign(plan.spatial.begin(), plan.spatial.begin() + plan.span);
+                std::sort(first_ratio.begin(), first_ratio.end());
+            }
+            std::vector<int> previous_ratio = previous;
+            std::sort(previous_ratio.begin(), previous_ratio.end());
+            if (!mixed || ratio == previous_ratio || ratio == first_ratio || chunk == previous || repeats_first)
+                continue;
+            previous = chunk;
+            plan.spatial.insert(plan.spatial.end(), chunk.begin(), chunk.end());
+            const int majority = share > 0.5f ? to : from;
+            for (int layer = 0; layer < plan.hold; ++layer)
+                plan.held.push_back(majority);
+            if ((int) plan.spatial.size() + plan.span > 64)
+                return plan;
+        }
+    }
+    return plan;
+}
+
+int MixedColorPalette::add_gradient(const std::vector<int> &tools, const std::vector<FilamentOptics> &filaments,
+                                    float layer_height, int hold, bool coextruded)
+{
+    if (tools.size() < 2 || (coextruded && tools.size() > 3))
+        return -1;
+    for (int tool : tools)
+        if (tool < 0 || tool > 9 || tool >= (int) filaments.size())
+            return -1;
+    const GradientPlan plan = plan_gradient(tools, hold);
+    const std::vector<int> &pattern = coextruded ? plan.held : plan.spatial;
+    if (pattern.empty())
+        return -1;
+    const int span = coextruded ? 0 : plan.span;
+    for (size_t i = 0; i < m_colors.size(); ++i)
+        if (m_colors[i].enabled && m_colors[i].gradient && m_colors[i].coextruded == coextruded &&
+            m_colors[i].gradient_hold == plan.hold && m_colors[i].gradient_span == span &&
+            m_colors[i].layer_pattern == pattern)
+            return (int) i;
+
+    std::string name;
+    for (size_t i = 0; i < tools.size(); ++i)
+    {
+        if (i > 0)
+            name += '>';
+        name.push_back(char('0' + tools[i]));
+    }
+    if (coextruded)
+        name += " coex";
+
+    MixedColor mc;
+    mc.id = m_next_id++;
+    mc.name = std::move(name);
+    mc.layer_pattern = pattern;
+    mc.predicted_color = predict_pattern(pattern, filaments, layer_height);
+    mc.target_color = mc.predicted_color;
+    mc.enabled = true;
+    mc.user_override = true;
+    mc.auto_generated = false;
+    mc.gradient = true;
+    mc.gradient_hold = (uint8_t) plan.hold;
+    mc.gradient_span = (uint8_t) span;
+    mc.coextruded = coextruded;
+    m_colors.push_back(std::move(mc));
+    return (int) m_colors.size() - 1;
+}
+
+int MixedColorPalette::add_pattern(const std::vector<int> &pattern, const std::vector<FilamentOptics> &filaments,
+                                   float layer_height)
+{
+    if (pattern.empty() || pattern.size() > 64)
+        return -1;
+    for (int tool : pattern)
+        if (tool < 0 || tool > 9 || tool >= (int) filaments.size())
+            return -1;
+    for (size_t i = 0; i < m_colors.size(); ++i)
+        if (m_colors[i].enabled && m_colors[i].layer_pattern == pattern)
+            return (int) i;
+
+    std::string digits;
+    digits.reserve(pattern.size());
+    for (int tool : pattern)
+        digits.push_back(char('0' + tool));
+
+    MixedColor mc;
+    mc.id = m_next_id++;
+    mc.name = digits;
+    mc.layer_pattern = pattern;
+    mc.predicted_color = predict_pattern(pattern, filaments, layer_height);
+    mc.target_color = mc.predicted_color;
+    mc.enabled = true;
+    mc.user_override = true;
+    mc.auto_generated = false;
+    m_colors.push_back(std::move(mc));
+    return (int) m_colors.size() - 1;
+}
+
 int MixedColorPalette::add_custom(const ColorRGB &target, const std::string &name)
 {
     MixedColor mc;

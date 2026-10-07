@@ -336,8 +336,10 @@ namespace Slic3r
 
 // Serialize a per-volume color mixing palette to a compact string.
 // Format: "RRGGBB:lock,RRGGBB:lock,..." where RRGGBB is 6 hex digits and lock is a signed int
-// (-1 for color-match, >= 0 for a forced extruder). A coextruded entry appends
-// "@count:e0:e1:e2:degrees". Empty palette returns an empty string.
+// (-1 for color-match, >= 0 for a forced extruder). A typed extruder sequence appends
+// "#0123210". A gradient uses "#g" before the digits. A coextruded entry appends
+// "@count:e0:e1:e2:degrees". Empty palette returns
+// an empty string.
 static std::string serialize_color_mixing_palette(const std::vector<ColorMixingRecipe> &palette)
 {
     if (palette.empty())
@@ -348,14 +350,25 @@ static std::string serialize_color_mixing_palette(const std::vector<ColorMixingR
     {
         const ColorMixingRecipe &r = palette[i];
         char buf[80];
-        int written = std::snprintf(buf, sizeof(buf), "%06X:%d", (unsigned) (r.rgb & 0xFFFFFFu), (int) r.extruder_lock);
-        if (r.is_coextruded() && written > 0 && written < (int) sizeof(buf))
-            std::snprintf(buf + written, sizeof(buf) - (size_t) written, "@%u:%d:%d:%d:%.1f",
-                          (unsigned) r.coex_count, (int) r.coex_extruders[0], (int) r.coex_extruders[1],
-                          (int) r.coex_extruders[2], r.coex_rotation_deg);
+        std::snprintf(buf, sizeof(buf), "%06X:%d", (unsigned) (r.rgb & 0xFFFFFFu), (int) r.extruder_lock);
+        std::string token = buf;
+        if (!r.pattern.empty())
+        {
+            if (r.gradient && r.gradient_hold > 0 && r.gradient_span > 0)
+                token += "#g" + std::to_string(r.gradient_hold) + ":" + std::to_string(r.gradient_span) + ":" +
+                         r.pattern;
+            else
+                token += r.gradient ? ("#g" + r.pattern) : ("#" + r.pattern);
+        }
+        if (r.is_coextruded())
+        {
+            std::snprintf(buf, sizeof(buf), "@%u:%d:%d:%d:%.1f", (unsigned) r.coex_count, (int) r.coex_extruders[0],
+                          (int) r.coex_extruders[1], (int) r.coex_extruders[2], r.coex_rotation_deg);
+            token += buf;
+        }
         if (i > 0)
             out += ',';
-        out += buf;
+        out += token;
     }
     return out;
 }
@@ -404,6 +417,31 @@ static std::vector<ColorMixingRecipe> parse_color_mixing_palette(const std::stri
         std::sscanf(s.c_str() + pos, "%6x", &rgb);
         std::sscanf(s.c_str() + colon + 1, "%d", &lock);
         ColorMixingRecipe rec((uint32_t) (rgb & 0xFFFFFFu), (int8_t) std::clamp(lock, -1, MAX_LOCK_EXTRUDER));
+        const size_t hash = s.find('#', colon + 1);
+        if (hash != std::string::npos && hash < comma)
+        {
+            size_t digit = hash + 1;
+            if (digit < comma && s[digit] == 'g')
+            {
+                rec.gradient = true;
+                ++digit;
+                int hold = 0;
+                int span = 0;
+                int consumed = 0;
+                if (std::sscanf(s.c_str() + digit, "%d:%d:%n", &hold, &span, &consumed) == 2 && consumed > 0 &&
+                    hold >= 1 && hold <= 4 && span >= 2 && span <= 8)
+                {
+                    rec.gradient_hold = (uint8_t) hold;
+                    rec.gradient_span = (uint8_t) span;
+                    digit += (size_t) consumed;
+                }
+            }
+            size_t end = digit;
+            while (end < comma && s[end] >= '0' && s[end] <= '9')
+                ++end;
+            if (end > digit)
+                rec.pattern = s.substr(digit, end - digit);
+        }
         const size_t at = s.find('@', colon + 1);
         if (at != std::string::npos && at < comma)
         {

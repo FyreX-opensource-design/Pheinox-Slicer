@@ -2199,6 +2199,51 @@ void ensure_color_mixing_recipes_for_used_states(const MixedColorPalette &palett
         ColorMixingRecipe &rec = mv.color_mixing_palette[i];
         if (rec.is_locked())
             continue;
+        // A typed extruder sequence is the color. Regenerating the blend palette must
+        // not replace it with whichever generated swatch now sits at this index.
+        if (rec.has_pattern() && (i >= palette.colors().size() || !palette.colors()[i].user_override))
+            continue;
+        if (i < palette.colors().size() && palette.colors()[i].user_override)
+        {
+            const MixedColor &mc = palette.colors()[i];
+            rec.pattern.clear();
+            for (int tool : mc.layer_pattern)
+                if (tool >= 0 && tool <= 9)
+                    rec.pattern.push_back(char('0' + tool));
+            rec.rgb = rgb_from_predicted(mc.predicted_color);
+            rec.extruder_lock = -1;
+            rec.gradient = mc.gradient;
+            rec.gradient_hold = mc.gradient_hold;
+            rec.gradient_span = mc.gradient_span;
+            rec.coex_count = 0;
+            rec.coex_extruders[0] = rec.coex_extruders[1] = rec.coex_extruders[2] = -1;
+            rec.coex_rotation_deg = 0.f;
+            if (mc.coextruded)
+            {
+                int slots[3] = {-1, -1, -1};
+                int count = 0;
+                for (int tool : mc.layer_pattern)
+                {
+                    bool seen = false;
+                    for (int k = 0; k < count; ++k)
+                        if (slots[k] == tool)
+                            seen = true;
+                    if (seen)
+                        continue;
+                    if (count >= 3)
+                        break;
+                    slots[count++] = tool;
+                }
+                if (count == 2 || count == 3)
+                {
+                    rec.coex_count = (uint8_t) count;
+                    for (int k = 0; k < 3; ++k)
+                        rec.coex_extruders[k] = (int8_t) slots[k];
+                    rec.coex_rotation_deg = mc.coex_rotation_deg;
+                }
+            }
+            continue;
+        }
         uint32_t new_rgb = 0;
         if (i < palette.colors().size())
             new_rgb = rgb_from_predicted(palette.colors()[i].predicted_color);

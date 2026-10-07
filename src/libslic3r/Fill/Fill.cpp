@@ -2006,10 +2006,10 @@ std::vector<Layer::ColorMixTopStripe> Layer::clip_color_mix_tops()
 
     for (ColorMixTopStripe &stripe : color_mix_top_stripes)
     {
-        if (stripe.pattern.empty() || stripe.area.empty() || stripe.coex_count >= 2)
+        if (stripe.z_only || stripe.pattern.empty() || stripe.area.empty() || stripe.coex_count >= 2)
             continue;
         const std::vector<int> uniq = unique_in_order(stripe.pattern);
-        if (uniq.size() != 2 && uniq.size() != 3)
+        if (uniq.size() < 2)
             continue;
         bool have_regions = true;
         for (int filament : uniq)
@@ -2409,7 +2409,13 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
                     {
                         // The outer-wall mix walks this loop itself, one bead tall, and shifts
                         // with the layer. Leave that path whole so it is not split twice.
-                        if (this->object()->config().color_mixing_wall_z_dither.value &&
+                        // A fade forces that walk even when the toggle is off.
+                        bool outer_wall_mix = this->object()->config().color_mixing_wall_z_dither.value;
+                        if (!outer_wall_mix)
+                            for (const ColorMixWallZ &wall : color_mix_wall_z)
+                                if (wall.force)
+                                    outer_wall_mix = true;
+                        if (outer_wall_mix &&
                             piece.attrs.role.is_external_perimeter() && !piece.attrs.role.is_bridge())
                         {
                             replacement.push_back(new ExtrusionPath(std::move(piece.pl), piece.attrs));
@@ -2501,7 +2507,12 @@ void Layer::emit_color_mix_top_lines(const std::vector<ColorMixTopStripe> &jobs)
 
 void Layer::dither_color_mix_outer_walls()
 {
-    if (color_mix_wall_z.empty() || !this->object()->config().color_mixing_wall_z_dither.value ||
+    const bool wall_toggle = this->object()->config().color_mixing_wall_z_dither.value;
+    bool wall_forced = false;
+    for (const ColorMixWallZ &stripe : color_mix_wall_z)
+        if (stripe.force)
+            wall_forced = true;
+    if (color_mix_wall_z.empty() || (!wall_toggle && !wall_forced) ||
         this->object()->print()->config().spiral_vase.value)
         return;
 
@@ -2595,7 +2606,7 @@ void Layer::dither_color_mix_outer_walls()
                                 for (int filament : unique_in_order(color_mix_wall_z[j].pattern))
                                     if (region_for_filament(*this, filament) < 0)
                                         have_regions = false;
-                                if (have_regions)
+                                if (have_regions && (wall_toggle || color_mix_wall_z[j].force))
                                     stripe_i = (int) j;
                             }
                             if (stripe_i < 0)

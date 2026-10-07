@@ -36,6 +36,10 @@ struct MixedColor
     // makes a layer blend look coextruded. Rotation spins which color faces which way.
     bool coextruded = false;
     float coex_rotation_deg = 0.f;
+    // Ratio steps every few layers from the first extruder toward the last, then back.
+    bool gradient = false;
+    uint8_t gradient_hold = 0;
+    uint8_t gradient_span = 0;
 };
 
 class MixedColorPalette
@@ -53,6 +57,21 @@ public:
 
     // Add a user-defined color by target. Returns the new ID.
     int add_custom(const ColorRGB &target, const std::string &name = "");
+
+    // Add a color whose layer order is the extruder sequence itself, such as {0,1,2,3,2,1,0}.
+    // Returns the index into colors(), or an existing entry with the same sequence.
+    int add_pattern(const std::vector<int> &pattern, const std::vector<FilamentOptics> &filaments,
+                    float layer_height);
+
+    // Fade `tools` in order and back. `hold` is how many layers each ratio lasts.
+    // coextruded keeps the wall shift so both filaments show on the painted surface.
+    // Returns the index into colors(), or an existing entry with the same fade.
+    int add_gradient(const std::vector<int> &tools, const std::vector<FilamentOptics> &filaments, float layer_height,
+                     int hold, bool coextruded);
+
+    // Visible color of one pass through `pattern`, repeated until the stack is opaque.
+    static ColorRGB predict_pattern(const std::vector<int> &pattern, const std::vector<FilamentOptics> &filaments,
+                                    float layer_height);
 
     // Remove a color (marks as disabled, preserves ID stability)
     void remove(int id);

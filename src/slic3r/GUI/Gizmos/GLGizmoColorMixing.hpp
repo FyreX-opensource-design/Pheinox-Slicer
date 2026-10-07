@@ -134,6 +134,12 @@ private:
     // to "unpainted" rather than applying a brush color.
     bool m_eraser_mode = false;
 
+    // Typed extruder sequence, such as 0123210. Each digit is one physical extruder.
+    // Fixed buffer so the text field cannot grow without a limit.
+    char m_pattern_text[65] = {};
+    std::string m_pattern_error;
+    int m_gradient_hold = 2;
+
     // Rebuild m_modified_colors so that every painted state has a valid render color. Entries
     // for which a volume recipe exists are rendered via find_best_match against the current
     // runtime palette (preserves painted intent even when filaments change); entries without a

@@ -32,13 +32,21 @@ void TriangleSelectorMmGui::render(ImGuiWrapper *imgui, const Transform3d &matri
     {
         if (m_gizmo_scene.has_VBOs(color_idx))
         {
-            if (color_idx > m_colors.size()) // Seed fill VBO
-                shader->set_uniform("uniform_color", TriangleSelectorGUI::get_seed_fill_color(
-                                                         color_idx == (m_colors.size() + 1)
-                                                             ? m_default_volume_color
-                                                             : m_colors[color_idx - (m_colors.size() + 1) - 1]));
-            else // Normal VBO
-                shader->set_uniform("uniform_color", color_idx == 0 ? m_default_volume_color : m_colors[color_idx - 1]);
+            const size_t color_count = m_colors.size();
+            if (color_idx > color_count)
+            {
+                // Seed-fill buffer. The unpainted seed is the first slot past the real colors.
+                if (color_idx == color_count + 1)
+                    shader->set_uniform("uniform_color",
+                                        TriangleSelectorGUI::get_seed_fill_color(m_default_volume_color));
+                else if (color_idx >= color_count + 2 && color_idx - color_count - 2 < color_count)
+                    shader->set_uniform("uniform_color", TriangleSelectorGUI::get_seed_fill_color(
+                                                             m_colors[color_idx - color_count - 2]));
+            }
+            else if (color_idx == 0)
+                shader->set_uniform("uniform_color", m_default_volume_color);
+            else if (color_idx - 1 < color_count)
+                shader->set_uniform("uniform_color", m_colors[color_idx - 1]);
 
             m_gizmo_scene.render(color_idx, shader);
         }
@@ -63,10 +71,14 @@ void TriangleSelectorMmGui::update_render_data()
     for (const Triangle &tr : m_triangles)
         if (tr.valid() && !tr.is_split())
         {
-            int color = int(tr.get_state()) <= int(m_colors.size()) ? int(tr.get_state()) : 0;
-            assert(m_colors.size() + 1 + color < m_gizmo_scene.triangle_indices.size());
-            std::vector<int> &iva =
-                m_gizmo_scene.triangle_indices[color + tr.is_selected_by_seed_fill() * (m_colors.size() + 1)];
+            // The buffer count is fixed when the selector is built. A pattern added after that
+            // grows the color list; indexing with the new size walks off the end of the buffers.
+            const size_t color_count = m_colors.size();
+            int color = int(tr.get_state()) <= int(color_count) ? int(tr.get_state()) : 0;
+            const size_t slot = size_t(color) + size_t(tr.is_selected_by_seed_fill()) * (color_count + 1);
+            if (slot >= m_gizmo_scene.triangle_indices.size())
+                continue;
+            std::vector<int> &iva = m_gizmo_scene.triangle_indices[slot];
 
             if (iva.size() + 3 > iva.capacity())
                 iva.reserve(next_highest_power_of_2(iva.size() + 3));

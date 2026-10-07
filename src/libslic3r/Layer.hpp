@@ -251,6 +251,13 @@ public:
         float coex_rotation_deg{0.f};
         // Set on the top solid shell (the skin and the solid layers under it).
         bool dither_infill{false};
+        // The mix changes which filament prints each layer. Do not also dither it along the path.
+        bool z_only{false};
+        // Which tool prints each layer when the mix fades. Empty means `pattern` is that schedule.
+        // pattern stays the two or three tools in shift order.
+        std::vector<int> schedule;
+        // A fade already splits the outer wall by ratio. Do not also thin that bead.
+        bool skip_overhang{false};
     };
     std::vector<ColorMixTopStripe> color_mix_top_stripes;
     // Outer walls of a 2-filament or 3-filament mix. color_mix_top_stripes is cleared
@@ -259,6 +266,8 @@ public:
     {
         ExPolygons area;
         std::vector<int> pattern;
+        // A fade mixes the outer wall even when the wall-dither toggle is off.
+        bool force{false};
     };
     std::vector<ColorMixWallZ> color_mix_wall_z;
     // Outer-wall pieces copied for the other coextrusion tools. Infill is not touched.
@@ -276,6 +285,7 @@ public:
         std::vector<int> tools;
         uint8_t coex_count{0};
         float rotation_deg{0.f};
+        std::vector<int> schedule;
     };
     std::vector<CoexPartnerWall> coex_partner_walls;
     std::vector<size_t> lslice_indices_sorted_by_print_order;

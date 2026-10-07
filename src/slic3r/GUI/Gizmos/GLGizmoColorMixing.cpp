@@ -1944,11 +1944,27 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
         // by the child window's content edge.
         ImGui::Indent(2.0f);
 
+        const std::vector<ColorMixingRecipe> *swatch_recipes = nullptr;
+        if (const ModelObject *swatch_mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr)
+            for (const ModelVolume *mv : swatch_mo->volumes)
+                if (mv->is_model_part() && !mv->color_mixing_palette.empty())
+                {
+                    swatch_recipes = &mv->color_mixing_palette;
+                    break;
+                }
+
         // Tier each entry by unique-filament count in its layer_pattern. 1 = pure filament,
-        // 2 = 2-way blend, 3+ = 3-way blend. Recipe-only entries past the runtime palette
-        // size fall back to tier 1 so they're always visible.
-        auto entry_tier = [this](size_t idx) -> int
+        // 2 = 2-way blend, 3+ = 3-way blend. A typed extruder sequence is its own row.
+        auto entry_tier = [this, swatch_recipes](size_t idx) -> int
         {
+            if (idx < m_palette.colors().size() && m_palette.colors()[idx].gradient)
+                return 6;
+            if (swatch_recipes && idx < swatch_recipes->size() && (*swatch_recipes)[idx].gradient)
+                return 6;
+            if (idx < m_palette.colors().size() && m_palette.colors()[idx].user_override)
+                return 5;
+            if (swatch_recipes && idx < swatch_recipes->size() && (*swatch_recipes)[idx].has_pattern())
+                return 5;
             if (idx < m_palette.colors().size() && m_palette.colors()[idx].coextruded)
                 return 4;
             if (idx >= m_palette.colors().size())
@@ -1962,16 +1978,17 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
             return std::min(3, (int) uniq.size());
         };
 
-        // Bucket indices into the three tiers, preserving generation order within each tier.
-        std::array<std::vector<size_t>, 4> tiers;
+        // Bucket indices into the tiers, preserving generation order within each tier.
+        std::array<std::vector<size_t>, 6> tiers;
         for (size_t i = 0; i < m_modified_colors.size(); ++i)
             tiers[entry_tier(i) - 1].push_back(i);
 
-        const std::array<std::string, 4> tier_labels = {_u8L("Single colors"), _u8L("2-way colors"),
-                                                        _u8L("3-way colors"), _u8L("Coextruded")};
+        const std::array<std::string, 6> tier_labels = {_u8L("Single colors"), _u8L("2-way colors"),
+                                                        _u8L("3-way colors"), _u8L("Coextruded"),
+                                                        _u8L("Patterns"), _u8L("Gradients")};
 
         bool first_section = true;
-        for (int t = 0; t < 4; ++t)
+        for (int t = 0; t < 6; ++t)
         {
             if (tiers[t].empty())
                 continue;
@@ -1999,22 +2016,49 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
                                        ImVec2(swatch_size, swatch_size)))
                     m_first_selected_color_idx = i;
 
-                if (ImGui::IsItemHovered() && i < m_palette.colors().size())
+                if (ImGui::IsItemHovered() &&
+                    ((swatch_recipes && i < swatch_recipes->size() && (*swatch_recipes)[i].has_pattern()) ||
+                     i < m_palette.colors().size()))
                 {
-                    const auto &mc = m_palette.colors()[i];
+                    const bool sequenced = swatch_recipes && i < swatch_recipes->size() &&
+                                           (*swatch_recipes)[i].has_pattern();
+                    const std::string sequence = sequenced ? (*swatch_recipes)[i].pattern
+                                                           : (i < m_palette.colors().size() &&
+                                                                      m_palette.colors()[i].user_override
+                                                                  ? m_palette.colors()[i].name
+                                                                  : std::string{});
                     ImGui::BeginTooltip();
-                    ImGui::Text("%s", mc.name.c_str());
-                    if (mc.coextruded)
-                        ImGui::TextDisabled("%s", _u8L("Shifts these tools' walls apart so the colors show together. "
-                                                       "Rotation turns which color faces which way.")
-                                                      .c_str());
-                    else if (mc.layer_pattern.size() <= 1)
-                        ImGui::TextDisabled("%s", _u8L("Single filament -- no swaps").c_str());
-                    else
-                        ImGui::TextDisabled("%s", GUI::format(_L("Repeats every %1% layers (%2% swaps per cycle)"),
-                                                              (int) mc.layer_pattern.size(),
-                                                              (int) mc.layer_pattern.size() - 1)
-                                                      .c_str());
+                    if (!sequence.empty())
+                    {
+                        ImGui::Text("%s", sequence.c_str());
+                        const bool fade = swatch_recipes && i < swatch_recipes->size() &&
+                                          (*swatch_recipes)[i].gradient;
+                        const bool fade_coex = fade && (*swatch_recipes)[i].is_coextruded();
+                        const bool palette_fade = i < m_palette.colors().size() && m_palette.colors()[i].gradient;
+                        const bool palette_coex = palette_fade && m_palette.colors()[i].coextruded;
+                        if (fade_coex || palette_coex)
+                            ImGui::TextDisabled("%s", _u8L("75/25, then 50/50, then 25/75. Walls stay shifted so both filaments show.").c_str());
+                        else if (fade || palette_fade)
+                            ImGui::TextDisabled("%s", _u8L("75/25, then 50/50, then 25/75. Fade is how many layers each mix lasts.").c_str());
+                        else
+                            ImGui::TextDisabled("%s", _u8L("Repeats this extruder sequence.").c_str());
+                    }
+                    else if (i < m_palette.colors().size())
+                    {
+                        const auto &mc = m_palette.colors()[i];
+                        ImGui::Text("%s", mc.name.c_str());
+                        if (mc.coextruded)
+                            ImGui::TextDisabled("%s", _u8L("Shifts these tools' walls apart so the colors show together. "
+                                                           "Rotation turns which color faces which way.")
+                                                          .c_str());
+                        else if (mc.layer_pattern.size() <= 1)
+                            ImGui::TextDisabled("%s", _u8L("Single filament -- no swaps").c_str());
+                        else
+                            ImGui::TextDisabled("%s", GUI::format(_L("Repeats every %1% layers (%2% swaps per cycle)"),
+                                                                  (int) mc.layer_pattern.size(),
+                                                                  (int) mc.layer_pattern.size() - 1)
+                                                          .c_str());
+                    }
                     ImGui::EndTooltip();
                 }
 
@@ -2058,6 +2102,122 @@ void GLGizmoColorMixing::on_render_input_window(float x, float y, float bottom_l
                                         .c_str());
             ImGui::PopTextWrapPos();
         }
+    }
+
+    if (!m_filament_optics.empty())
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGuiPureWrap::text(_u8L("Pattern"));
+        ImGui::SameLine();
+        ImGui::PushItemWidth(slider_width);
+        ImGui::InputTextWithHint("##mix_pattern", "0123210", m_pattern_text, sizeof(m_pattern_text));
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGuiPureWrap::button(_u8L("Add")))
+        {
+            std::vector<int> tools;
+            bool ok = false;
+            for (const char *digit = m_pattern_text; *digit != '\0'; ++digit)
+            {
+                if (*digit == ' ' || *digit == ',')
+                    continue;
+                if (*digit < '0' || *digit > '9')
+                {
+                    tools.clear();
+                    ok = false;
+                    break;
+                }
+                const int tool = *digit - '0';
+                if (tool >= (int) m_filament_optics.size())
+                {
+                    tools.clear();
+                    ok = false;
+                    break;
+                }
+                tools.push_back(tool);
+                ok = true;
+            }
+            if (!ok || tools.empty())
+                m_pattern_error = _u8L("Use digits for the loaded extruders, starting at 0.");
+            else
+            {
+                const int idx = m_palette.add_pattern(tools, m_filament_optics, m_layer_height);
+                if (idx >= 0)
+                {
+                    m_first_selected_color_idx = (size_t) idx;
+                    m_pattern_error.clear();
+                    rebuild_modified_colors();
+                }
+            }
+        }
+        auto endpoint_tools = [&]() -> std::vector<int>
+        {
+            std::vector<int> tools;
+            for (const char *digit = m_pattern_text; *digit != '\0'; ++digit)
+            {
+                if (*digit == ' ' || *digit == ',')
+                    continue;
+                if (*digit < '0' || *digit > '9')
+                    return {};
+                const int tool = *digit - '0';
+                if (tool >= (int) m_filament_optics.size())
+                    return {};
+                if (std::find(tools.begin(), tools.end(), tool) == tools.end())
+                    tools.push_back(tool);
+            }
+            return tools;
+        };
+        ImGui::AlignTextToFramePadding();
+        ImGuiPureWrap::text(_u8L("Fade"));
+        ImGui::SameLine();
+        ImGui::PushItemWidth(slider_width);
+        ImGui::SliderInt("##gradient_hold", &m_gradient_hold, 1, 4, "%d layers");
+        ImGui::PopItemWidth();
+        if (ImGuiPureWrap::button(_u8L("Gradient")))
+        {
+            const std::vector<int> tools = endpoint_tools();
+            if (tools.size() < 2)
+                m_pattern_error = _u8L("Enter two or more extruders, such as 01 or 012.");
+            else
+            {
+                const int idx = m_palette.add_gradient(tools, m_filament_optics, m_layer_height, m_gradient_hold,
+                                                       false);
+                if (idx >= 0)
+                {
+                    m_first_selected_color_idx = (size_t) idx;
+                    m_pattern_error.clear();
+                    rebuild_modified_colors();
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGuiPureWrap::button(_u8L("Coex gradient")))
+        {
+            const std::vector<int> tools = endpoint_tools();
+            if (tools.size() < 2 || tools.size() > 3)
+                m_pattern_error = _u8L("Coex gradients use 2 or 3 extruders, such as 01 or 012.");
+            else
+            {
+                const int idx = m_palette.add_gradient(tools, m_filament_optics, m_layer_height, m_gradient_hold,
+                                                       true);
+                if (idx >= 0)
+                {
+                    m_first_selected_color_idx = (size_t) idx;
+                    m_pattern_error.clear();
+                    rebuild_modified_colors();
+                }
+            }
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        if (!m_pattern_error.empty())
+            ImGui::TextDisabled("%s", m_pattern_error.c_str());
+        else
+            ImGui::TextDisabled("%s", _u8L("Each digit is a physical extruder, starting at 0. "
+                                           "Gradient holds 75/25, then 50/50, then 25/75 for Fade layers each. "
+                                           "Mixed-wall dither splits that mix along the outer wall. "
+                                           "Click Gradient again after changing Fade.")
+                                          .c_str());
+        ImGui::PopTextWrapPos();
     }
 
     ImGui::Separator();
@@ -2400,6 +2560,25 @@ void GLGizmoColorMixing::rebuild_modified_colors()
         if (recipes && i < recipes->size())
         {
             const ColorMixingRecipe &rec = (*recipes)[i];
+            if (rec.has_pattern())
+            {
+                std::vector<int> tools;
+                for (char digit : rec.pattern)
+                {
+                    if (digit < '0' || digit > '9')
+                        continue;
+                    const int tool = digit - '0';
+                    if (tool >= 0 && tool < (int) m_filament_optics.size())
+                        tools.push_back(tool);
+                }
+                if (!tools.empty())
+                {
+                    const ColorRGB predicted = MixedColorPalette::predict_pattern(tools, m_filament_optics,
+                                                                                   m_layer_height);
+                    m_modified_colors.emplace_back(predicted.r(), predicted.g(), predicted.b(), 1.0f);
+                    continue;
+                }
+            }
             if (rec.is_locked() && (int) rec.extruder_lock < (int) m_filament_optics.size() && rec.extruder_lock >= 0)
             {
                 const ColorRGB &c = m_filament_optics[rec.extruder_lock].color;
@@ -2438,6 +2617,11 @@ void GLGizmoColorMixing::rebuild_modified_colors()
 
     m_first_selected_color_idx = std::min(m_first_selected_color_idx, m_modified_colors.size() - 1);
     m_second_selected_color_idx = std::min(m_second_selected_color_idx, m_modified_colors.size() - 1);
+
+    // The paint mesh keeps one color slot per swatch, sized when it is created. Adding a
+    // pattern grows that list; reuse the old mesh and the new swatch is written past the end.
+    if (!m_triangle_selectors.empty())
+        this->init_model_triangle_selectors();
 }
 
 } // namespace Slic3r::GUI

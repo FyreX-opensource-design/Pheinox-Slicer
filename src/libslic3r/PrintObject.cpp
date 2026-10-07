@@ -1456,7 +1456,7 @@ static bool is_virtual_color_stripe(const Layer::ColorMixTopStripe &stripe)
     std::vector<int> uniq = stripe.pattern;
     std::sort(uniq.begin(), uniq.end());
     uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
-    return uniq.size() == 2 || uniq.size() == 3;
+    return uniq.size() >= 2;
 }
 
 // Area on `other` that continues the same virtual-color recipe painted on `here`.
